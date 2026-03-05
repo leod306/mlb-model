@@ -1,0 +1,123 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>MLB Predictions</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="topbar">
+      <div>
+        <h1>MLB Predictions</h1>
+        <p class="muted">FiveThirtyEight-style cards (starter version)</p>
+      </div>
+
+      <div class="controls">
+        <label>Date</label>
+        <input id="game_date" type="date" value="{{ game_date }}" />
+        <button id="loadBtn">Load Predictions</button>
+      </div>
+    </header>
+
+    <div id="status" class="status muted">Pick a date and click “Load Predictions”.</div>
+
+    <div id="cards" class="grid"></div>
+  </div>
+
+<script>
+const statusEl = document.getElementById("status");
+const cardsEl = document.getElementById("cards");
+const dateEl = document.getElementById("game_date");
+const loadBtn = document.getElementById("loadBtn");
+
+function pct(x) { return Math.round(x * 1000) / 10; }
+
+function cardHTML(p) {
+  // if pred missing features, show warning
+  let body = "";
+  if (!p.ok) {
+    body = `<div class="warn">No prediction: ${p.error || "missing features"}</div>`;
+  } else {
+    const winPct = pct(p.home_win_prob);
+    body = `
+      <div class="row">
+        <div class="metric">
+          <div class="label">Home Win %</div>
+          <div class="value">${winPct}%</div>
+        </div>
+        <div class="metric">
+          <div class="label">Fair ML (Home)</div>
+          <div class="value">${p.home_moneyline_fair}</div>
+        </div>
+        <div class="metric">
+          <div class="label">Proj Total</div>
+          <div class="value">${p.pred_total_runs}</div>
+        </div>
+        <div class="metric">
+          <div class="label">Proj Run Diff</div>
+          <div class="value">${p.pred_run_diff}</div>
+        </div>
+      </div>
+
+      <div class="bar">
+        <div class="barFill" style="width:${Math.max(0, Math.min(100, winPct))}%"></div>
+      </div>
+
+      <div class="muted small">Win bar = P(home win)</div>
+    `;
+  }
+
+  return `
+    <div class="card">
+      <div class="matchup">
+        <div class="team">
+          ${p.away_logo ? `<img src="${p.away_logo}" class="logo" />` : ""}
+          <div>
+            <div class="abbr">${p.away_team}</div>
+            <div class="muted small">${p.away_starting_pitcher || ""}</div>
+          </div>
+        </div>
+
+        <div class="at">@</div>
+
+        <div class="team right">
+          <div>
+            <div class="abbr">${p.home_team}</div>
+            <div class="muted small">${p.home_starting_pitcher || ""}</div>
+          </div>
+          ${p.home_logo ? `<img src="${p.home_logo}" class="logo" />` : ""}
+        </div>
+      </div>
+
+      ${body}
+    </div>
+  `;
+}
+
+async function loadPredictions() {
+  const d = dateEl.value;
+  statusEl.textContent = "Loading...";
+  cardsEl.innerHTML = "";
+
+  const res = await fetch(`/api/predict/today?game_date=${encodeURIComponent(d)}`);
+  const data = await res.json();
+
+  if (!data.ok) {
+    statusEl.textContent = "Error loading predictions.";
+    return;
+  }
+
+  if (data.count === 0) {
+    statusEl.textContent = `No games found for ${d}.`;
+    return;
+  }
+
+  statusEl.textContent = `Loaded ${data.count} games for ${d}.`;
+  cardsEl.innerHTML = data.predictions.map(cardHTML).join("");
+}
+
+loadBtn.addEventListener("click", loadPredictions);
+</script>
+</body>
+</html>

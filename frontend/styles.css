@@ -1,0 +1,53 @@
+body{
+    font-family: Arial;
+    background:#0f172a;
+    color:white;
+    margin:0;
+}
+
+header{
+    background:#1e293b;
+    padding:25px;
+    text-align:center;
+}
+
+.container{
+    max-width:900px;
+    margin:auto;
+    padding:20px;
+}
+
+.game-card{
+    background:#1e293b;
+    border-radius:10px;
+    padding:20px;
+    margin-bottom:20px;
+}
+
+.teams{
+    font-size:22px;
+    font-weight:bold;
+}
+
+.prob-bar{
+    margin-top:10px;
+    background:#334155;
+    height:20px;
+    border-radius:10px;
+    overflow:hidden;
+}
+
+.home-bar{
+    height:100%;
+    background:#22c55e;
+}
+
+.stats{
+    margin-top:10px;
+    color:#cbd5f5;
+}
+
+.edge{
+    margin-top:10px;
+    font-weight:bold;
+}
