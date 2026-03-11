@@ -1,26 +1,29 @@
-# app/main.py
 import os
 import psycopg2
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
-from dotenv import load_dotenv
 
+# Only load .env locally, never on Heroku dynos
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-load_dotenv(os.path.join(PROJECT_ROOT, ".env"), override=False)
+if os.getenv("DYNO") is None:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(PROJECT_ROOT, ".env"), override=False)
 
 app = FastAPI(title="MLB Predictions")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "").replace("postgresql+psycopg2://", "postgresql://", 1)
+def get_database_url() -> str:
+    url = os.getenv("DATABASE_URL", "")
+    url = url.replace("postgresql+psycopg2://", "postgresql://", 1)
+    if not url:
+        raise RuntimeError("DATABASE_URL not set")
+    return url
 
 def conn():
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL not set")
-    return psycopg2.connect(DATABASE_URL)
+    return psycopg2.connect(get_database_url())
 
 def team_logo(team_id: int | None) -> str | None:
     if not team_id:
         return None
-    # MLB static cap logo (works well on dark backgrounds)
     return f"https://www.mlbstatic.com/team-logos/team-cap-on-dark/{team_id}.svg"
 
 PAGE = """
@@ -140,12 +143,12 @@ PAGE = """
 
           <div class="right">
             <div class="row2">
-              <div class="chip"><span class="pick">ML:</span> ${g.ml_pick} • ${pct(g.home_win_prob)} home</div>
+              <div class="chip"><span class="pick">ML:</span> ${g.ml_pick ?? "—"} • ${pct(g.home_win_prob)} home</div>
               <div class="chip"><span class="pick">Implied:</span> H ${fmtML(g.home_ml_implied)} / A ${fmtML(g.away_ml_implied)}</div>
             </div>
             <div class="row2">
-              <div class="chip"><span class="pick">Run Line:</span> ${g.runline_pick} (margin ${num(g.run_diff_pred,2)})</div>
-              <div class="chip"><span class="pick">Total:</span> ${g.ou_pick} • pred ${num(g.total_runs_pred,2)}</div>
+              <div class="chip"><span class="pick">Run Line:</span> ${g.runline_pick ?? "—"} (margin ${num(g.run_diff_pred,2)})</div>
+              <div class="chip"><span class="pick">Total:</span> ${g.ou_pick ?? "—"} • pred ${num(g.total_runs_pred,2)}</div>
             </div>
           </div>
         </div>
@@ -153,12 +156,15 @@ PAGE = """
         <div class="mid">
           <div class="box">
             <h3>Moneyline</h3>
-            <div class="big">${g.ml_pick}</div>
+            <div class="big">${g.ml_pick ?? "—"}</div>
             <div class="small">Home win prob: ${pct(g.home_win_prob)} • Away: ${pct(g.away_win_prob)}</div>
+              <div class="confidence-bar">
+            <div class="confidence-fill" style="width:${Math.abs(g.home_win_prob - 0.5) * 200}%"></div>
+            </div>
           </div>
           <div class="box">
             <h3>Run Line & Total</h3>
-            <div class="big">${g.runline_pick} • ${g.ou_pick}</div>
+            <div class="big">${g.runline_pick ?? "—"} • ${g.ou_pick ?? "—"}</div>
             <div class="small">Pred margin: ${num(g.run_diff_pred,2)} • Pred total: ${num(g.total_runs_pred,2)}</div>
           </div>
         </div>
@@ -190,24 +196,40 @@ def home():
 @app.get("/api/predictions/today")
 def api_today():
     sql = """
-    WITH d AS (
+    WITH next_day AS (
       SELECT COALESCE(
         (SELECT CURRENT_DATE WHERE EXISTS (SELECT 1 FROM predictions WHERE official_date = CURRENT_DATE)),
         (SELECT MIN(official_date) FROM predictions WHERE official_date >= CURRENT_DATE)
       ) AS day
+    ),
+    pred_cols AS (
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'predictions' AND column_name = 'home_win_prob'
+      ) AS has_new_cols
     )
     SELECT
       p.game_pk,
       p.official_date,
-      p.away_team, p.home_team,
-      p.home_win_prob, p.away_win_prob,
-      p.home_ml_implied, p.away_ml_implied,
-      p.run_diff_pred, p.total_runs_pred,
-      p.ml_pick, p.runline_pick, p.ou_pick,
-      g.home_team_id, g.away_team_id,
-      pr.home_sp_name, pr.away_sp_name
+      p.away_team,
+      p.home_team,
+      CASE WHEN pc.has_new_cols THEN p.home_win_prob ELSE p.win_probability END AS home_win_prob,
+      CASE WHEN pc.has_new_cols THEN p.away_win_prob ELSE (1 - p.win_probability) END AS away_win_prob,
+      CASE WHEN pc.has_new_cols THEN p.home_ml_implied ELSE NULL END AS home_ml_implied,
+      CASE WHEN pc.has_new_cols THEN p.away_ml_implied ELSE NULL END AS away_ml_implied,
+      CASE WHEN pc.has_new_cols THEN p.run_diff_pred ELSE NULL END AS run_diff_pred,
+      CASE WHEN pc.has_new_cols THEN p.total_runs_pred ELSE NULL END AS total_runs_pred,
+      CASE WHEN pc.has_new_cols THEN p.ml_pick ELSE CASE WHEN p.prediction = 1 THEN 'HOME' WHEN p.prediction = 0 THEN 'AWAY' ELSE NULL END END AS ml_pick,
+      CASE WHEN pc.has_new_cols THEN p.runline_pick ELSE NULL END AS runline_pick,
+      CASE WHEN pc.has_new_cols THEN p.ou_pick ELSE NULL END AS ou_pick,
+      g.home_team_id,
+      g.away_team_id,
+      pr.home_sp_name,
+      pr.away_sp_name
     FROM predictions p
-    JOIN d ON p.official_date = d.day
+    CROSS JOIN pred_cols pc
+    JOIN next_day d ON p.official_date = d.day
     LEFT JOIN games g ON g.game_pk = p.game_pk
     LEFT JOIN game_probables pr ON pr.game_pk = p.game_pk
     ORDER BY p.game_pk;
@@ -219,34 +241,24 @@ def api_today():
 
     out = []
     for r in rows:
-        game_pk = r[0]
-        day = r[1]
-        away_team, home_team = r[2], r[3]
-        home_win_prob, away_win_prob = r[4], r[5]
-        home_ml, away_ml = r[6], r[7]
-        run_diff_pred, total_runs_pred = r[8], r[9]
-        ml_pick, runline_pick, ou_pick = r[10], r[11], r[12]
-        home_id, away_id = r[13], r[14]
-        home_sp, away_sp = r[15], r[16]
-
         out.append({
-            "game_pk": int(game_pk),
-            "date": str(day),
-            "away_team": away_team,
-            "home_team": home_team,
-            "home_win_prob": float(home_win_prob) if home_win_prob is not None else None,
-            "away_win_prob": float(away_win_prob) if away_win_prob is not None else None,
-            "home_ml_implied": int(home_ml) if home_ml is not None else None,
-            "away_ml_implied": int(away_ml) if away_ml is not None else None,
-            "run_diff_pred": float(run_diff_pred) if run_diff_pred is not None else None,
-            "total_runs_pred": float(total_runs_pred) if total_runs_pred is not None else None,
-            "ml_pick": ml_pick,
-            "runline_pick": runline_pick,
-            "ou_pick": ou_pick,
-            "home_logo": team_logo(home_id),
-            "away_logo": team_logo(away_id),
-            "home_sp": home_sp,
-            "away_sp": away_sp,
+            "game_pk": int(r[0]),
+            "date": str(r[1]),
+            "away_team": r[2],
+            "home_team": r[3],
+            "home_win_prob": float(r[4]) if r[4] is not None else None,
+            "away_win_prob": float(r[5]) if r[5] is not None else None,
+            "home_ml_implied": int(r[6]) if r[6] is not None else None,
+            "away_ml_implied": int(r[7]) if r[7] is not None else None,
+            "run_diff_pred": float(r[8]) if r[8] is not None else None,
+            "total_runs_pred": float(r[9]) if r[9] is not None else None,
+            "ml_pick": r[10],
+            "runline_pick": r[11],
+            "ou_pick": r[12],
+            "home_logo": team_logo(r[13]),
+            "away_logo": team_logo(r[14]),
+            "home_sp": r[15],
+            "away_sp": r[16],
         })
 
     return JSONResponse(out)

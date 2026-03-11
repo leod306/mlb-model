@@ -1,4 +1,3 @@
-# scripts/mlb_engine_daily.py
 from __future__ import annotations
 
 import os
@@ -11,10 +10,11 @@ import pandas as pd
 import requests
 import psycopg2
 from psycopg2.extras import execute_values
-from dotenv import load_dotenv
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-load_dotenv(os.path.join(PROJECT_ROOT, ".env"), override=False)
+if os.getenv("DYNO") is None:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(PROJECT_ROOT, ".env"), override=False)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").replace("postgresql+psycopg2://", "postgresql://", 1)
 
@@ -25,6 +25,7 @@ PRED_TABLE = os.getenv("MLB_PREDICTIONS_TABLE", "predictions")
 SEASON = int(os.getenv("MLB_SEASON", "2026"))
 GAME_TYPES = os.getenv("MLB_GAME_TYPES", "S,R")
 WINDOW_DAYS = int(os.getenv("WINDOW_DAYS", "30"))
+DEFAULT_TOTAL_LINE = float(os.getenv("DEFAULT_TOTAL_LINE", "8.5"))
 
 SLEEP = float(os.getenv("REQUEST_SLEEP_SECONDS", "0.05"))
 HTTP_TIMEOUT = 25
@@ -33,8 +34,6 @@ ML_DIR = os.path.join(PROJECT_ROOT, "ml")
 WIN_MODEL_PATH = os.getenv("MLB_WIN_MODEL_PATH", os.path.join(ML_DIR, "win_model.pkl"))
 RUN_MODEL_PATH = os.getenv("MLB_RUN_MODEL_PATH", os.path.join(ML_DIR, "run_model.pkl"))
 TOTAL_MODEL_PATH = os.getenv("MLB_TOTAL_MODEL_PATH", os.path.join(ML_DIR, "total_model.pkl"))
-
-# fallback if you only have ml/mlb_model.pkl
 FALLBACK_MODEL_PATH = os.getenv("MLB_MODEL_PATH", os.path.join(ML_DIR, "mlb_model.pkl"))
 
 MLB_BASE = "https://statsapi.mlb.com/api/v1"
@@ -43,7 +42,7 @@ MLB_FEED = "https://statsapi.mlb.com/api/v1.1/game/{gamePk}/feed/live"
 
 def conn():
     if not DATABASE_URL:
-        raise RuntimeError("Missing DATABASE_URL (set it in .env / Heroku config)")
+        raise RuntimeError("DATABASE_URL not set")
     return psycopg2.connect(DATABASE_URL)
 
 
@@ -58,12 +57,10 @@ def utc_dt(iso_z: str) -> datetime:
 
 
 def ensure_tables(cur):
-    # Create minimal tables if missing
     cur.execute(f"CREATE TABLE IF NOT EXISTS {GAMES_TABLE} (game_pk BIGINT PRIMARY KEY);")
     cur.execute(f"CREATE TABLE IF NOT EXISTS {PROB_TABLE} (game_pk BIGINT PRIMARY KEY);")
     cur.execute(f"CREATE TABLE IF NOT EXISTS {PRED_TABLE} (game_pk BIGINT PRIMARY KEY);")
 
-    # --- games columns (so we can do logos via team_id)
     cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS official_date DATE;")
     cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS game_date_utc TIMESTAMPTZ;")
     cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS season INT;")
@@ -74,39 +71,34 @@ def ensure_tables(cur):
     cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS home_team_id INT;")
     cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS away_team_id INT;")
     cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();")
-
     cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{GAMES_TABLE}_official_date ON {GAMES_TABLE}(official_date);")
 
-    # --- probables columns
     cur.execute(f"ALTER TABLE {PROB_TABLE} ADD COLUMN IF NOT EXISTS official_date DATE;")
     cur.execute(f"ALTER TABLE {PROB_TABLE} ADD COLUMN IF NOT EXISTS home_sp_id INT;")
     cur.execute(f"ALTER TABLE {PROB_TABLE} ADD COLUMN IF NOT EXISTS away_sp_id INT;")
     cur.execute(f"ALTER TABLE {PROB_TABLE} ADD COLUMN IF NOT EXISTS home_sp_name TEXT;")
     cur.execute(f"ALTER TABLE {PROB_TABLE} ADD COLUMN IF NOT EXISTS away_sp_name TEXT;")
+    cur.execute(f"ALTER TABLE {PROB_TABLE} ADD COLUMN IF NOT EXISTS status TEXT;")
     cur.execute(f"ALTER TABLE {PROB_TABLE} ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();")
-
     cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{PROB_TABLE}_official_date ON {PROB_TABLE}(official_date);")
 
-    # --- predictions columns (new)
     cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS official_date DATE;")
     cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS home_team TEXT;")
     cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS away_team TEXT;")
 
+    cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS prediction INT;")
+    cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS win_probability DOUBLE PRECISION;")
+
     cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS home_win_prob DOUBLE PRECISION;")
     cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS away_win_prob DOUBLE PRECISION;")
-
     cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS home_ml_implied INT;")
     cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS away_ml_implied INT;")
-
     cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS run_diff_pred DOUBLE PRECISION;")
     cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS total_runs_pred DOUBLE PRECISION;")
-
     cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS ml_pick TEXT;")
     cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS runline_pick TEXT;")
     cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS ou_pick TEXT;")
-
     cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();")
-
     cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{PRED_TABLE}_official_date ON {PRED_TABLE}(official_date);")
 
 
@@ -256,7 +248,6 @@ def upsert_probables(cur, start: date, end: date) -> int:
 
 
 def implied_moneyline(p: float) -> Optional[int]:
-    # Converts probability to "fair" American odds (no vig)
     if p is None:
         return None
     p = float(p)
@@ -268,16 +259,14 @@ def implied_moneyline(p: float) -> Optional[int]:
 
 
 def load_models() -> Tuple[Any, Any, Any]:
-    # Prefer explicit 3-model setup; fall back to mlb_model.pkl for win if needed.
     win = joblib.load(WIN_MODEL_PATH) if os.path.exists(WIN_MODEL_PATH) else joblib.load(FALLBACK_MODEL_PATH)
-    run = joblib.load(RUN_MODEL_PATH) if os.path.exists(RUN_MODEL_PATH) else None
-    tot = joblib.load(TOTAL_MODEL_PATH) if os.path.exists(TOTAL_MODEL_PATH) else None
-    if run is None or tot is None:
-        raise FileNotFoundError(
-            "Missing run_model.pkl or total_model.pkl in /ml. "
-            "Expected ml/run_model.pkl and ml/total_model.pkl (or set MLB_RUN_MODEL_PATH / MLB_TOTAL_MODEL_PATH)."
-        )
-    return win, run, tot
+    if not os.path.exists(RUN_MODEL_PATH):
+        raise FileNotFoundError(f"Missing run model: {RUN_MODEL_PATH}")
+    if not os.path.exists(TOTAL_MODEL_PATH):
+        raise FileNotFoundError(f"Missing total model: {TOTAL_MODEL_PATH}")
+    run = joblib.load(RUN_MODEL_PATH)
+    total = joblib.load(TOTAL_MODEL_PATH)
+    return win, run, total
 
 
 def align_to_model(df: pd.DataFrame, model: Any) -> pd.DataFrame:
@@ -297,7 +286,6 @@ def align_to_model(df: pd.DataFrame, model: Any) -> pd.DataFrame:
 
 
 def build_features_for_date(cur, target: date) -> pd.DataFrame:
-    # Keep it simple for now: starters presence + ids (later you’ll add rolling stats)
     cur.execute(
         f"""
         SELECT g.game_pk, g.official_date, g.home_team, g.away_team,
@@ -319,11 +307,8 @@ def build_features_for_date(cur, target: date) -> pd.DataFrame:
         "home_team_id", "away_team_id",
         "home_sp_id", "away_sp_id", "home_sp_name", "away_sp_name"
     ])
-
-    # basic starter-known features
     df["has_home_sp"] = df["home_sp_id"].notna().astype(int)
     df["has_away_sp"] = df["away_sp_id"].notna().astype(int)
-
     return df
 
 
@@ -334,6 +319,7 @@ def save_predictions(cur, out: pd.DataFrame) -> int:
     rows = list(out[
         [
             "game_pk", "official_date", "away_team", "home_team",
+            "prediction", "win_probability",
             "home_win_prob", "away_win_prob",
             "home_ml_implied", "away_ml_implied",
             "run_diff_pred", "total_runs_pred",
@@ -341,12 +327,12 @@ def save_predictions(cur, out: pd.DataFrame) -> int:
         ]
     ].itertuples(index=False, name=None))
 
-    now = datetime.now(timezone.utc)
-    rows2 = [r + (now,) for r in rows]
+    rows2 = [r + (datetime.now(timezone.utc),) for r in rows]
 
     sql = f"""
     INSERT INTO {PRED_TABLE} (
       game_pk, official_date, away_team, home_team,
+      prediction, win_probability,
       home_win_prob, away_win_prob,
       home_ml_implied, away_ml_implied,
       run_diff_pred, total_runs_pred,
@@ -358,6 +344,8 @@ def save_predictions(cur, out: pd.DataFrame) -> int:
       official_date=EXCLUDED.official_date,
       away_team=EXCLUDED.away_team,
       home_team=EXCLUDED.home_team,
+      prediction=EXCLUDED.prediction,
+      win_probability=EXCLUDED.win_probability,
       home_win_prob=EXCLUDED.home_win_prob,
       away_win_prob=EXCLUDED.away_win_prob,
       home_ml_implied=EXCLUDED.home_ml_implied,
@@ -395,7 +383,6 @@ def main():
             n_sched = upsert_schedule(cur, start, end, tmap)
             n_prob = upsert_probables(cur, start, end)
 
-            # pick slate (today or next available)
             cur.execute(f"SELECT MIN(official_date) FROM {GAMES_TABLE} WHERE official_date >= %s", (today,))
             slate = cur.fetchone()[0]
             if not slate:
@@ -413,41 +400,33 @@ def main():
             X_run = align_to_model(base, run_model)
             X_tot = align_to_model(base, total_model)
 
-            # Win prob (home)
             if hasattr(win_model, "predict_proba"):
                 p = win_model.predict_proba(X_win)
                 home_prob = p[:, 1] if p.shape[1] > 1 else p[:, 0]
             else:
-                # fallback: treat predict output as prob-ish (not ideal)
                 home_prob = win_model.predict(X_win)
 
             home_prob = [float(x) for x in home_prob]
             away_prob = [float(1 - x) for x in home_prob]
-
-            # Run diff (home - away) and total runs
+            prediction = [1 if hp >= 0.5 else 0 for hp in home_prob]
             run_diff = [float(x) for x in run_model.predict(X_run)]
             total_runs = [float(x) for x in total_model.predict(X_tot)]
 
-            # Picks
             ml_pick = ["HOME" if hp >= 0.5 else "AWAY" for hp in home_prob]
-
-            # Runline pick: simple rule using predicted margin
-            # If home margin >= 1.5 => Home -1.5, else Away +1.5
             runline_pick = ["HOME -1.5" if rd >= 1.5 else "AWAY +1.5" for rd in run_diff]
-
-            # O/U pick: no sportsbook line yet, so compare vs 8.5 default (you can change later)
-            default_line = float(os.getenv("DEFAULT_TOTAL_LINE", "8.5"))
-            ou_pick = ["OVER" if tr >= default_line else "UNDER" for tr in total_runs]
+            ou_pick = ["OVER" if tr >= DEFAULT_TOTAL_LINE else "UNDER" for tr in total_runs]
 
             out = pd.DataFrame({
                 "game_pk": base["game_pk"].astype(int),
-                "official_date": base["official_date"].astype(str),
+                "official_date": pd.to_datetime(base["official_date"]).dt.date,
                 "away_team": base["away_team"].astype(str),
                 "home_team": base["home_team"].astype(str),
+                "prediction": prediction,
+                "win_probability": home_prob,
                 "home_win_prob": home_prob,
                 "away_win_prob": away_prob,
-                "home_ml_implied": [implied_moneyline(hp) for hp in home_prob],
-                "away_ml_implied": [implied_moneyline(ap) for ap in away_prob],
+                "home_ml_implied": [implied_moneyline(x) for x in home_prob],
+                "away_ml_implied": [implied_moneyline(x) for x in away_prob],
                 "run_diff_pred": run_diff,
                 "total_runs_pred": total_runs,
                 "ml_pick": ml_pick,
