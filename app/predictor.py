@@ -2,56 +2,43 @@
 """
 MLB Predictor module
 
-This file provides a stable import for:
+Stable imports supported:
     from app.predictor import predict_from_features
+    from app.predictor import predict_game
 
 It supports:
 - Loading a scikit-learn style model (joblib pickle)
-- Optional preprocessing pipeline (if you saved a full Pipeline as the model, that's fine too)
 - Predicting from a dict, list[dict], or pandas DataFrame
 - Returning predictions + probabilities (when available)
 
 ENV options:
 - MLB_MODEL_PATH (default: models/mlb_model.pkl)
-- MLB_POSITIVE_CLASS (default: 1)  # which class probability to return if model has classes_
+- MLB_POSITIVE_CLASS (default: 1)
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Union
 
 import joblib
 import pandas as pd
 
 
-# -----------------------------
-# Config
-# -----------------------------
 MODEL_PATH = os.getenv("MLB_MODEL_PATH", os.path.join("models", "mlb_model.pkl"))
 POSITIVE_CLASS = int(os.getenv("MLB_POSITIVE_CLASS", "1"))
 
-
-# -----------------------------
-# Types
-# -----------------------------
 FeaturesInput = Union[Dict[str, Any], List[Dict[str, Any]], pd.DataFrame]
 
 
 @dataclass
 class PredictionResult:
-    """
-    A single-game prediction result.
-    """
     prediction: Any
     proba: Optional[float]
     details: Dict[str, Any]
 
 
-# -----------------------------
-# Model loading (cached)
-# -----------------------------
 _MODEL: Any = None
 
 
@@ -70,9 +57,6 @@ def _load_model() -> Any:
     return _MODEL
 
 
-# -----------------------------
-# Utilities
-# -----------------------------
 def _to_dataframe(features: FeaturesInput) -> pd.DataFrame:
     if isinstance(features, pd.DataFrame):
         return features.copy()
@@ -91,9 +75,6 @@ def _to_dataframe(features: FeaturesInput) -> pd.DataFrame:
 
 
 def _get_positive_class_index(model: Any) -> Optional[int]:
-    """
-    If model has classes_ (sklearn classifiers), return the column index for POSITIVE_CLASS.
-    """
     classes = getattr(model, "classes_", None)
     if classes is None:
         return None
@@ -102,14 +83,10 @@ def _get_positive_class_index(model: Any) -> Optional[int]:
         classes_list = list(classes)
         return classes_list.index(POSITIVE_CLASS)
     except Exception:
-        # If POSITIVE_CLASS isn't present, default to last column
         return len(classes) - 1
 
 
 def _safe_predict_proba(model: Any, X: pd.DataFrame) -> Optional[List[float]]:
-    """
-    Return probability of the "positive" class if available.
-    """
     if not hasattr(model, "predict_proba"):
         return None
 
@@ -117,28 +94,44 @@ def _safe_predict_proba(model: Any, X: pd.DataFrame) -> Optional[List[float]]:
     if proba is None:
         return None
 
-    # proba expected shape: (n, n_classes)
     idx = _get_positive_class_index(model)
     if idx is None:
-        # Unexpected for predict_proba, but safe
         return None
 
     return [float(row[idx]) for row in proba]
 
 
 def _safe_predict(model: Any, X: pd.DataFrame) -> List[Any]:
-    """
-    Always try predict(); raise a clear error if missing.
-    """
     if not hasattr(model, "predict"):
         raise AttributeError("Loaded model does not have a .predict() method.")
     preds = model.predict(X)
     return list(preds)
 
 
-# -----------------------------
-# Public API
-# -----------------------------
+def _is_int_like(x: Any) -> bool:
+    try:
+        return float(x).is_integer()
+    except Exception:
+        return False
+
+
+def _moneyline_from_prob(prob: Optional[float]) -> Optional[int]:
+    if prob is None:
+        return None
+
+    try:
+        p = float(prob)
+    except Exception:
+        return None
+
+    if p <= 0 or p >= 1:
+        return None
+
+    if p >= 0.5:
+        return int(round(-(p / (1 - p)) * 100))
+    return int(round(((1 - p) / p) * 100))
+
+
 def predict_from_features(features: FeaturesInput) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Predict outcomes from feature rows.
@@ -154,7 +147,7 @@ def predict_from_features(features: FeaturesInput) -> Union[Dict[str, Any], List
 
     Returned fields:
       - prediction
-      - win_probability (if model supports predict_proba)
+      - win_probability
       - model_path
       - n_features_used
     """
@@ -167,7 +160,7 @@ def predict_from_features(features: FeaturesInput) -> Union[Dict[str, Any], List
             "win_probability": None,
             "model_path": MODEL_PATH,
             "n_features_used": 0,
-            "warning": "No features provided."
+            "warning": "No features provided.",
         }
 
     preds = _safe_predict(model, X)
@@ -185,15 +178,89 @@ def predict_from_features(features: FeaturesInput) -> Union[Dict[str, Any], List
             }
         )
 
-    # Return shape matches input shape
     if isinstance(features, dict):
         return results[0]
     return results
 
 
-def _is_int_like(x: Any) -> bool:
+def predict_game(features_row: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Wrapper used by routes.py.
+
+    Returns a stable response shape expected by your /api/predict/today route.
+    """
+    required_features = [
+        "era_diff",
+        "whip_diff",
+        "home_last10_runs_scored",
+        "away_last10_runs_scored",
+        "home_last10_runs_allowed",
+        "away_last10_runs_allowed",
+        "home_last10_run_diff",
+        "away_last10_run_diff",
+    ]
+
+    missing = [f for f in required_features if features_row.get(f) is None]
+
+    if missing:
+        return {
+            "ok": False,
+            "error": f"missing features: {', '.join(missing)}",
+            "missing_features": missing,
+            "home_win_prob": None,
+            "home_moneyline_fair": None,
+            "pred_total_runs": None,
+            "pred_run_diff": None,
+        }
+
     try:
-        # numpy scalars, ints, bools
-        return float(x).is_integer()
-    except Exception:
-        return False
+        result = predict_from_features(features_row)
+
+        prediction = result.get("prediction")
+        win_probability = result.get("win_probability")
+
+        home_win_prob: Optional[float] = None
+        if win_probability is not None:
+            home_win_prob = float(win_probability)
+        elif prediction is not None:
+            # fallback if model has no predict_proba
+            home_win_prob = 0.55 if int(prediction) == 1 else 0.45
+
+        try:
+            h_scored = float(features_row.get("home_last10_runs_scored", 0))
+            a_scored = float(features_row.get("away_last10_runs_scored", 0))
+            h_allowed = float(features_row.get("home_last10_runs_allowed", 0))
+            a_allowed = float(features_row.get("away_last10_runs_allowed", 0))
+            pred_total_runs = round(((h_scored + a_allowed) / 2 + (a_scored + h_allowed) / 2), 2)
+        except Exception:
+            pred_total_runs = None
+
+        try:
+            home_rd = float(features_row.get("home_last10_run_diff", 0))
+            away_rd = float(features_row.get("away_last10_run_diff", 0))
+            era_diff = float(features_row.get("era_diff", 0))
+            whip_diff = float(features_row.get("whip_diff", 0))
+            pred_run_diff = round((home_rd - away_rd) + (-0.35 * era_diff) + (-0.15 * whip_diff), 2)
+        except Exception:
+            pred_run_diff = None
+
+        return {
+            "ok": True,
+            "prediction": prediction,
+            "home_win_prob": home_win_prob,
+            "home_moneyline_fair": _moneyline_from_prob(home_win_prob),
+            "pred_total_runs": pred_total_runs,
+            "pred_run_diff": pred_run_diff,
+            "model_path": result.get("model_path"),
+            "n_features_used": result.get("n_features_used"),
+        }
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "home_win_prob": None,
+            "home_moneyline_fair": None,
+            "pred_total_runs": None,
+            "pred_run_diff": None,
+        }

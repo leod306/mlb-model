@@ -65,3 +65,34 @@ header{
   background: linear-gradient(90deg,#4f8cff,#31d0aa);
   border-radius: 6px;
 }
+.navbar{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  padding:14px 28px;
+  background:#020617;
+  border-bottom:1px solid #1e293b;
+}
+
+.nav-links{
+  display:flex;
+  gap:25px;
+}
+
+.nav-links a{
+  color:white;
+  text-decoration:none;
+  font-weight:600;
+  font-size:15px;
+}
+
+.nav-links a:hover{
+  color:#3b82f6;
+}
+
+.nav-logo{
+  color:white;
+  text-decoration:none;
+  font-weight:bold;
+  font-size:18px;
+}

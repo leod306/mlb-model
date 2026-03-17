@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block title %}Matchups | MLB Model{% endblock %}
+
+{% block content %}
+
+<header>
+<h1>MLB Matchups</h1>
+</header>
+
+<label>Date</label>
+<input id="game_date" type="date" value="{{ game_date }}">
+<button id="loadBtn">Load Games</button>
+
+<div id="status" class="stats"></div>
+<div id="cards"></div>
+
+{% endblock %}
+
+{% block scripts %}
+
+<script>
+
+const statusEl=document.getElementById("status");
+const cardsEl=document.getElementById("cards");
+const dateEl=document.getElementById("game_date");
+
+function matchupCard(g){
+return `
+<div class="game-card">
+
+<div class="teams">
+${g.away_team} @ ${g.home_team}
+</div>
+
+<div class="stats">
+Away SP: ${g.away_starting_pitcher || "TBD"}<br>
+Home SP: ${g.home_starting_pitcher || "TBD"}
+</div>
+
+</div>
+`;
+}
+
+async function loadGames(){
+
+const d=dateEl.value;
+statusEl.textContent="Loading...";
+cardsEl.innerHTML="";
+
+const res=await fetch(`/api/games?game_date=${d}`);
+const data=await res.json();
+
+if(!data.ok){
+statusEl.textContent="Error loading games";
+return;
+}
+
+statusEl.textContent=`Loaded ${data.count} games`;
+
+cardsEl.innerHTML=data.games.map(matchupCard).join("");
+
+}
+
+document.getElementById("loadBtn").onclick=loadGames;
+
+</script>
+
+{% endblock %}
