@@ -18,12 +18,13 @@ def run_step(name: str, script_path: str) -> None:
 
 
 def main():
+    run_step("Load Schedule", "scripts/load_2026_schedule.py")
     run_step("Load Probable Starters", "scripts/load_probable_starters.py")
     run_step("Load Odds", "scripts/load_odds.py")
-    run_step("Quick Update Predictions", "scripts/mlb_quick_update.py")
-    print("\n✅ Quick update complete.")
+    run_step("Build Features", "scripts/build_team_features.py")
+    run_step("Run MLB Engine", "scripts/mlb_engine_daily.py")
+    print("\n✅ Full update complete.")
 
 
 if __name__ == "__main__":
     main()
-    

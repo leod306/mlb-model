@@ -18,7 +18,7 @@ def run_step(name: str, script_path: str) -> None:
 
 
 def main():
-    run_step("Load Probable Starters", "scripts/load_probable_starters.py")
+    run_step("Load Probable Starters", "scripts/load_2026_probable_starters.py")
     run_step("Load Odds", "scripts/load_odds.py")
     run_step("Quick Update Predictions", "scripts/mlb_quick_update.py")
     print("\n✅ Quick update complete.")

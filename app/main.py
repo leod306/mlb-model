@@ -158,9 +158,6 @@ PAGE = """
             <h3>Moneyline</h3>
             <div class="big">${g.ml_pick ?? "—"}</div>
             <div class="small">Home win prob: ${pct(g.home_win_prob)} • Away: ${pct(g.away_win_prob)}</div>
-              <div class="confidence-bar">
-            <div class="confidence-fill" style="width:${Math.abs(g.home_win_prob - 0.5) * 200}%"></div>
-            </div>
           </div>
           <div class="box">
             <h3>Run Line & Total</h3>

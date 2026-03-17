@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import math
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 import pandas as pd
@@ -30,7 +29,6 @@ HTTP_TIMEOUT = int(os.getenv("FEATURES_HTTP_TIMEOUT", "25"))
 
 # ---------------------------------------------
 # Park factors (baseline hand-tuned defaults)
-# Replace with a more exact table later if you want
 # ---------------------------------------------
 PARK_FACTORS = {
     "ARI": {"run": 1.00, "hr": 1.03},
@@ -45,7 +43,7 @@ PARK_FACTORS = {
     "COL": {"run": 1.24, "hr": 1.19},
     "DET": {"run": 0.95, "hr": 0.92},
     "HOU": {"run": 0.99, "hr": 1.03},
-    "KC":  {"run": 1.00, "hr": 0.96},
+    "KC": {"run": 1.00, "hr": 0.96},
     "LAA": {"run": 1.00, "hr": 1.01},
     "LAD": {"run": 0.99, "hr": 0.98},
     "MIA": {"run": 0.94, "hr": 0.91},
@@ -56,11 +54,11 @@ PARK_FACTORS = {
     "OAK": {"run": 0.96, "hr": 0.94},
     "PHI": {"run": 1.05, "hr": 1.09},
     "PIT": {"run": 0.98, "hr": 0.95},
-    "SD":  {"run": 0.96, "hr": 0.94},
+    "SD": {"run": 0.96, "hr": 0.94},
     "SEA": {"run": 0.95, "hr": 0.93},
-    "SF":  {"run": 0.93, "hr": 0.89},
+    "SF": {"run": 0.93, "hr": 0.89},
     "STL": {"run": 0.99, "hr": 0.97},
-    "TB":  {"run": 0.97, "hr": 0.95},
+    "TB": {"run": 0.97, "hr": 0.95},
     "TEX": {"run": 1.04, "hr": 1.07},
     "TOR": {"run": 1.03, "hr": 1.06},
     "WSH": {"run": 1.00, "hr": 1.01},
@@ -83,7 +81,7 @@ STADIUM_COORDS = {
     "COL": (39.7559, -104.9942),
     "DET": (42.3390, -83.0485),
     "HOU": (29.7573, -95.3555),
-    "KC":  (39.0517, -94.4803),
+    "KC": (39.0517, -94.4803),
     "LAA": (33.8003, -117.8827),
     "LAD": (34.0739, -118.2400),
     "MIA": (25.7781, -80.2197),
@@ -93,11 +91,11 @@ STADIUM_COORDS = {
     "NYY": (40.8296, -73.9262),
     "PHI": (39.9057, -75.1665),
     "PIT": (40.4469, -80.0057),
-    "SD":  (32.7073, -117.1566),
+    "SD": (32.7073, -117.1566),
     "SEA": (47.5914, -122.3325),
-    "SF":  (37.7786, -122.3893),
+    "SF": (37.7786, -122.3893),
     "STL": (38.6226, -90.1928),
-    "TB":  (27.7682, -82.6534),
+    "TB": (27.7682, -82.6534),
     "TEX": (32.7513, -97.0825),
     "TOR": (43.6414, -79.3894),
     "WSH": (38.8730, -77.0074),
@@ -163,12 +161,15 @@ def safe_float(v: Any, default: float = 0.0) -> float:
 def weighted_avg(df: pd.DataFrame, value_col: str, weight_col: str) -> float:
     if value_col not in df.columns or weight_col not in df.columns or df.empty:
         return 0.0
+
     work = df[[value_col, weight_col]].copy()
     work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
     work[weight_col] = pd.to_numeric(work[weight_col], errors="coerce")
     work = work.dropna()
+
     if work.empty or work[weight_col].sum() == 0:
         return 0.0
+
     return float((work[value_col] * work[weight_col]).sum() / work[weight_col].sum())
 
 
@@ -229,7 +230,6 @@ def ensure_features_table(cur) -> None:
 
 
 def load_games_for_window(cur, start_date: date, end_date: date) -> pd.DataFrame:
-    # Pull only what we need; optional columns handled if missing.
     cur.execute(f"""
         SELECT
             g.game_pk,
@@ -262,20 +262,76 @@ def load_games_for_window(cur, start_date: date, end_date: date) -> pd.DataFrame
     ])
 
 
+def _empty_pitching_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=[
+        "Team",
+        "Tm",
+        "Name",
+        "PlayerName",
+        "IP",
+        "IP_float",
+        "GS",
+        "ERA",
+        "WHIP",
+        "FIP",
+        "xFIP",
+        "SIERA",
+        "K-BB%",
+        "K/9",
+        "BB/9",
+        "HR/9",
+        "WAR",
+    ])
+
+
+def _empty_batting_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=[
+        "Team",
+        "Tm",
+        "PA",
+        "wRC+",
+        "ISO",
+        "BB%",
+        "K%",
+    ])
+
+
 def fetch_pitching_df(season: int) -> pd.DataFrame:
-    # FanGraphs player pitching via pybaseball
-    df = pitching_stats(season, season, qual=0, ind=1)
-    if df is None or len(df) == 0:
-        raise RuntimeError("pitching_stats returned no rows")
-    return df
+    """
+    Pull team/player pitching data from pybaseball/FanGraphs.
+    If FanGraphs parsing fails, return a safe empty frame so the pipeline continues.
+    """
+    try:
+        df = pitching_stats(season, season, qual=0, ind=1)
+        if df is None or len(df) == 0:
+            print(f"⚠️ pitching_stats returned no rows for {season}")
+            return _empty_pitching_df()
+
+        print(f"✅ pitching_stats loaded for {season}: {df.shape}")
+        return df
+    except Exception as e:
+        print(f"⚠️ pitching_stats failed for {season}: {e}")
+        print("⚠️ Returning empty pitching dataframe so feature build can continue.")
+        return _empty_pitching_df()
 
 
 def fetch_batting_df(season: int) -> pd.DataFrame:
-    # FanGraphs player batting via pybaseball
-    df = batting_stats(season, season, qual=0, ind=1)
-    if df is None or len(df) == 0:
-        raise RuntimeError("batting_stats returned no rows")
-    return df
+    """
+    Pull team/player batting data from pybaseball/FanGraphs.
+    If FanGraphs parsing fails, return a safe empty frame so the pipeline continues.
+    """
+    try:
+        df = batting_stats(season, season, qual=0, ind=1)
+        if df is None or len(df) == 0:
+            print(f"⚠️ batting_stats returned no rows for {season}")
+            return _empty_batting_df()
+
+        print(f"✅ batting_stats loaded for {season}: {df.shape}")
+        return df
+    except Exception as e:
+        print(f"⚠️ batting_stats failed for {season}: {e}")
+        print("⚠️ Returning empty batting dataframe so feature build can continue.")
+        return _empty_batting_df()
 
 
 def normalize_fg_team(team: str) -> str:
@@ -295,16 +351,23 @@ def normalize_fg_team(team: str) -> str:
 
 
 def build_pitcher_lookup(pitch_df: pd.DataFrame) -> Dict[str, dict]:
+    if pitch_df.empty:
+        return {}
+
     name_col = pick_col(pitch_df, ["Name", "PlayerName"])
     team_col = pick_col(pitch_df, ["Team", "Tm"])
     if not name_col or not team_col:
-        raise RuntimeError("Could not find required pitcher name/team columns")
+        print("⚠️ Could not find required pitcher name/team columns; using empty pitcher lookup.")
+        return {}
 
     out: Dict[str, dict] = {}
     for _, r in pitch_df.iterrows():
-        key = norm_name(str(r[name_col]))
+        key = norm_name(str(r.get(name_col, "")))
+        if not key:
+            continue
+
         out[key] = {
-            "team": normalize_fg_team(str(r[team_col])),
+            "team": normalize_fg_team(str(r.get(team_col, ""))),
             "era": safe_float(r.get("ERA")),
             "whip": safe_float(r.get("WHIP")),
             "fip": safe_float(r.get("FIP")),
@@ -312,21 +375,26 @@ def build_pitcher_lookup(pitch_df: pd.DataFrame) -> Dict[str, dict]:
             "siera": safe_float(r.get("SIERA")),
             "kbb": safe_float(r.get("K-BB%")),
         }
+
     return out
 
 
 def build_bullpen_lookup(pitch_df: pd.DataFrame) -> Dict[str, dict]:
+    if pitch_df.empty:
+        return {}
+
     team_col = pick_col(pitch_df, ["Team", "Tm"])
     ip_col = pick_col(pitch_df, ["IP", "IP_float"])
     gs_col = pick_col(pitch_df, ["GS"])
+
     if not team_col or not ip_col:
-        raise RuntimeError("Could not find required bullpen columns")
+        print("⚠️ Could not find required bullpen columns; using empty bullpen lookup.")
+        return {}
 
     work = pitch_df.copy()
     work["team_norm"] = work[team_col].astype(str).map(normalize_fg_team)
     work[ip_col] = pd.to_numeric(work[ip_col], errors="coerce").fillna(0)
 
-    # Treat GS == 0 as relievers when available; otherwise use all pitchers
     if gs_col and gs_col in work.columns:
         work[gs_col] = pd.to_numeric(work[gs_col], errors="coerce").fillna(0)
         rel = work[work[gs_col] == 0].copy()
@@ -337,19 +405,26 @@ def build_bullpen_lookup(pitch_df: pd.DataFrame) -> Dict[str, dict]:
 
     out: Dict[str, dict] = {}
     for team, grp in rel.groupby("team_norm"):
+        if not team:
+            continue
         out[team] = {
             "era": weighted_avg(grp, "ERA", ip_col),
             "fip": weighted_avg(grp, "FIP", ip_col),
             "xfip": weighted_avg(grp, "xFIP", ip_col),
         }
+
     return out
 
 
 def build_team_offense_lookup(bat_df: pd.DataFrame) -> Dict[str, dict]:
+    if bat_df.empty:
+        return {}
+
     team_col = pick_col(bat_df, ["Team", "Tm"])
     pa_col = pick_col(bat_df, ["PA"])
     if not team_col or not pa_col:
-        raise RuntimeError("Could not find required batting team/PA columns")
+        print("⚠️ Could not find required batting team/PA columns; using empty offense lookup.")
+        return {}
 
     work = bat_df.copy()
     work["team_norm"] = work[team_col].astype(str).map(normalize_fg_team)
@@ -357,12 +432,15 @@ def build_team_offense_lookup(bat_df: pd.DataFrame) -> Dict[str, dict]:
 
     out: Dict[str, dict] = {}
     for team, grp in work.groupby("team_norm"):
+        if not team:
+            continue
         out[team] = {
             "wrc_plus": weighted_avg(grp, "wRC+", pa_col),
             "iso": weighted_avg(grp, "ISO", pa_col),
             "bb_pct": weighted_avg(grp, "BB%", pa_col),
             "k_pct": weighted_avg(grp, "K%", pa_col),
         }
+
     return out
 
 
@@ -382,15 +460,38 @@ def fetch_weather_for_game(home_team: str, game_dt_utc: Any) -> dict:
             "humidity": 50.0,
         }
 
-    if pd.isna(game_dt_utc):
-        game_time = datetime.now(timezone.utc)
-    elif isinstance(game_dt_utc, datetime):
-        game_time = game_dt_utc.astimezone(timezone.utc)
-    else:
-        try:
-            game_time = pd.to_datetime(game_dt_utc, utc=True).to_pydatetime()
-        except Exception:
+    try:
+        if pd.isna(game_dt_utc):
             game_time = datetime.now(timezone.utc)
+
+        elif isinstance(game_dt_utc, pd.Timestamp):
+            # Handle pandas Timestamp safely
+            if game_dt_utc.tzinfo is None:
+                game_time = game_dt_utc.tz_localize("UTC").to_pydatetime()
+            else:
+                game_time = game_dt_utc.tz_convert("UTC").to_pydatetime()
+
+        elif isinstance(game_dt_utc, datetime):
+            # Handle normal Python datetime safely
+            if game_dt_utc.tzinfo is None:
+                game_time = game_dt_utc.replace(tzinfo=timezone.utc)
+            else:
+                game_time = game_dt_utc.astimezone(timezone.utc)
+
+        else:
+            parsed = pd.to_datetime(game_dt_utc, errors="coerce")
+            if pd.isna(parsed):
+                game_time = datetime.now(timezone.utc)
+            elif isinstance(parsed, pd.Timestamp):
+                if parsed.tzinfo is None:
+                    game_time = parsed.tz_localize("UTC").to_pydatetime()
+                else:
+                    game_time = parsed.tz_convert("UTC").to_pydatetime()
+            else:
+                game_time = datetime.now(timezone.utc)
+
+    except Exception:
+        game_time = datetime.now(timezone.utc)
 
     lat, lon = coords
     start_date = game_time.date().isoformat()
@@ -440,6 +541,7 @@ def fetch_weather_for_game(home_team: str, game_dt_utc: Any) -> dict:
             "wind_dir": safe_float(wind_dir[best_i], 0.0),
             "humidity": safe_float(humidity[best_i], 50.0),
         }
+
     except Exception:
         return {
             "temp_f": 72.0,
@@ -449,18 +551,27 @@ def fetch_weather_for_game(home_team: str, game_dt_utc: Any) -> dict:
         }
 
 
-def build_feature_rows(games_df: pd.DataFrame,
-                       pitcher_lookup: Dict[str, dict],
-                       bullpen_lookup: Dict[str, dict],
-                       offense_lookup: Dict[str, dict]) -> list[tuple]:
+def build_feature_rows(
+    games_df: pd.DataFrame,
+    pitcher_lookup: Dict[str, dict],
+    bullpen_lookup: Dict[str, dict],
+    offense_lookup: Dict[str, dict],
+) -> list[tuple]:
     rows: list[tuple] = []
 
     for _, g in games_df.iterrows():
-        home_team = norm_team(str(g["home_team"]))
-        away_team = norm_team(str(g["away_team"]))
+        game_pk = g.get("game_pk")
+        if pd.isna(game_pk):
+            continue
 
-        home_sp = pitcher_lookup.get(norm_name(str(g["home_sp_name"] or "")), {})
-        away_sp = pitcher_lookup.get(norm_name(str(g["away_sp_name"] or "")), {})
+        home_team = norm_team(str(g.get("home_team", "")))
+        away_team = norm_team(str(g.get("away_team", "")))
+
+        home_sp_name = "" if pd.isna(g.get("home_sp_name")) else str(g.get("home_sp_name"))
+        away_sp_name = "" if pd.isna(g.get("away_sp_name")) else str(g.get("away_sp_name"))
+
+        home_sp = pitcher_lookup.get(norm_name(home_sp_name), {})
+        away_sp = pitcher_lookup.get(norm_name(away_sp_name), {})
 
         home_bp = bullpen_lookup.get(home_team, {})
         away_bp = bullpen_lookup.get(away_team, {})
@@ -469,7 +580,7 @@ def build_feature_rows(games_df: pd.DataFrame,
         away_off = offense_lookup.get(away_team, {})
 
         park = get_park_factors(home_team)
-        weather = fetch_weather_for_game(home_team, g["game_date_utc"])
+        weather = fetch_weather_for_game(home_team, g.get("game_date_utc"))
 
         home_sp_fip = safe_float(home_sp.get("fip"))
         away_sp_fip = safe_float(away_sp.get("fip"))
@@ -483,8 +594,8 @@ def build_feature_rows(games_df: pd.DataFrame,
         away_wrc = safe_float(away_off.get("wrc_plus"), 100.0)
 
         rows.append((
-            int(g["game_pk"]),
-            g["official_date"],
+            int(game_pk),
+            g.get("official_date"),
             home_team,
             away_team,
 
@@ -665,6 +776,7 @@ def main():
                 return
 
             print(f"Games loaded: {len(games_df)}")
+
             print("Pulling pitcher stats...")
             pitch_df = fetch_pitching_df(SEASON)
 
@@ -674,6 +786,10 @@ def main():
             pitcher_lookup = build_pitcher_lookup(pitch_df)
             bullpen_lookup = build_bullpen_lookup(pitch_df)
             offense_lookup = build_team_offense_lookup(bat_df)
+
+            print(f"Pitcher lookup entries: {len(pitcher_lookup)}")
+            print(f"Bullpen lookup entries: {len(bullpen_lookup)}")
+            print(f"Offense lookup entries: {len(offense_lookup)}")
 
             rows = build_feature_rows(
                 games_df=games_df,
