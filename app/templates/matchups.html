@@ -1,69 +1,80 @@
 {% extends "base.html" %}
 
-{% block title %}Matchups | MLB Model{% endblock %}
+{% block title %}Matchups{% endblock %}
 
 {% block content %}
-
 <header>
-<h1>MLB Matchups</h1>
+  <h1>MLB Matchups</h1>
+  <p>Today's slate with team logos and probable starters.</p>
 </header>
 
-<label>Date</label>
-<input id="game_date" type="date" value="{{ game_date }}">
-<button id="loadBtn">Load Games</button>
+<div style="margin-bottom:16px;">
+  <label for="game_date"><strong>Date</strong></label>
+  <input id="game_date" type="date" value="{{ game_date }}">
+  <button id="loadBtn" type="button">Load Matchups</button>
+</div>
 
-<div id="status" class="stats"></div>
+<div id="status" class="stats">Click “Load Matchups”.</div>
 <div id="cards"></div>
-
 {% endblock %}
 
 {% block scripts %}
-
 <script>
+const statusEl = document.getElementById("status");
+const cardsEl = document.getElementById("cards");
+const dateEl = document.getElementById("game_date");
+const loadBtn = document.getElementById("loadBtn");
 
-const statusEl=document.getElementById("status");
-const cardsEl=document.getElementById("cards");
-const dateEl=document.getElementById("game_date");
+function gameCardHTML(g) {
+  return `
+    <div class="game-card">
+      <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap;">
+        ${g.away_logo ? `<img src="${g.away_logo}" alt="${g.away_team}" style="width:36px;height:36px;">` : ""}
+        <div class="teams">${g.away_team} @ ${g.home_team}</div>
+        ${g.home_logo ? `<img src="${g.home_logo}" alt="${g.home_team}" style="width:36px;height:36px;">` : ""}
+      </div>
 
-function matchupCard(g){
-return `
-<div class="game-card">
-
-<div class="teams">
-${g.away_team} @ ${g.home_team}
-</div>
-
-<div class="stats">
-Away SP: ${g.away_starting_pitcher || "TBD"}<br>
-Home SP: ${g.home_starting_pitcher || "TBD"}
-</div>
-
-</div>
-`;
+      <div class="stats">
+        Away SP: ${g.away_starting_pitcher || "TBD"}<br>
+        Home SP: ${g.home_starting_pitcher || "TBD"}<br>
+        Game PK: ${g.game_pk ?? "—"}
+      </div>
+    </div>
+  `;
 }
 
-async function loadGames(){
+async function loadMatchups() {
+  try {
+    const d = dateEl.value;
+    statusEl.textContent = "Loading...";
+    cardsEl.innerHTML = "";
 
-const d=dateEl.value;
-statusEl.textContent="Loading...";
-cardsEl.innerHTML="";
+    const res = await fetch(`/api/games?game_date=${encodeURIComponent(d)}`);
+    if (!res.ok) {
+      statusEl.textContent = `Request failed: ${res.status}`;
+      return;
+    }
 
-const res=await fetch(`/api/games?game_date=${d}`);
-const data=await res.json();
+    const data = await res.json();
+    if (!data.ok || !data.games) {
+      statusEl.textContent = "Could not load matchups.";
+      return;
+    }
 
-if(!data.ok){
-statusEl.textContent="Error loading games";
-return;
+    if (data.games.length === 0) {
+      statusEl.textContent = `No matchups found for ${d}.`;
+      return;
+    }
+
+    statusEl.textContent = `Loaded ${data.count} games for ${d}.`;
+    cardsEl.innerHTML = data.games.map(gameCardHTML).join("");
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = "Error loading matchups.";
+  }
 }
 
-statusEl.textContent=`Loaded ${data.count} games`;
-
-cardsEl.innerHTML=data.games.map(matchupCard).join("");
-
-}
-
-document.getElementById("loadBtn").onclick=loadGames;
-
+loadBtn.addEventListener("click", loadMatchups);
+document.addEventListener("DOMContentLoaded", loadMatchups);
 </script>
-
 {% endblock %}
