@@ -18,11 +18,12 @@ def run_step(name: str, script_name: str) -> None:
 
 
 def main():
-    run_step("Load Schedule", "load_2026_schedule.py")
+    run_step("Load Schedule",          "load_2026_schedule.py")
     run_step("Load Probable Starters", "load_probable_starters.py")
-    run_step("Load Odds", "load_odds.py")
-    run_step("Build Features", "build_team_features.py")
-    run_step("Run MLB Engine", "mlb_engine_daily.py")
+    run_step("Load Lineups",           "load_lineups.py")
+    run_step("Load Odds",              "load_odds.py")
+    run_step("Build Features",         "build_team_features.py")
+    run_step("Run MLB Engine",         "mlb_engine_daily.py")
     print("\n✅ Full update complete.")
 
 

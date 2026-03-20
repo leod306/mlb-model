@@ -11,7 +11,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 env_path = os.path.join(BASE_DIR, ".env")
 
 load_dotenv(env_path)
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL", "").replace("postgres://", "postgresql://", 1)
 
 engine = create_engine(DATABASE_URL)
 

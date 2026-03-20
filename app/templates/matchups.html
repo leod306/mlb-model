@@ -5,33 +5,303 @@
 {% block content %}
 <header>
   <h1>MLB Matchups</h1>
-  <p>Today's slate with team logos and probable starters.</p>
+  <p>Today's slate · Probable starters · Batter vs Pitcher splits</p>
 </header>
 
-<div style="margin-bottom:16px;">
+<div style="margin-bottom:16px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
   <label for="game_date"><strong>Date</strong></label>
   <input id="game_date" type="date" value="{{ game_date }}">
   <button id="loadBtn" type="button">Load Matchups</button>
 </div>
 
-<div id="status" class="stats">Click “Load Matchups”.</div>
+<div id="status" class="stats">Click "Load Matchups".</div>
 <div id="cards"></div>
+
+<style>
+  /* ── Stat toggle pills ── */
+  .stat-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 14px 0 10px;
+  }
+  .stat-pill {
+    padding: 4px 12px;
+    border-radius: 20px;
+    border: 1px solid #334155;
+    background: #0f172a;
+    color: #94a3b8;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all .15s;
+    user-select: none;
+  }
+  .stat-pill.active {
+    background: #3b82f6;
+    border-color: #3b82f6;
+    color: white;
+  }
+
+  /* ── Heatmap grid ── */
+  .grid-wrap {
+    overflow-x: auto;
+    margin-top: 6px;
+  }
+  .bvp-grid {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 13px;
+  }
+  .bvp-grid th {
+    padding: 6px 10px;
+    text-align: center;
+    color: #64748b;
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    border-bottom: 1px solid #1e293b;
+    white-space: nowrap;
+  }
+  .bvp-grid th.col-batter {
+    text-align: left;
+    min-width: 150px;
+  }
+  .bvp-grid td {
+    padding: 7px 10px;
+    text-align: center;
+    border-bottom: 1px solid #0f172a;
+    transition: opacity .1s;
+  }
+  .bvp-grid td.col-batter {
+    text-align: left;
+    white-space: nowrap;
+  }
+  .bvp-grid tr:hover td {
+    opacity: .85;
+  }
+
+  /* batter name + position */
+  .batter-name  { font-weight: 600; color: #e2e8f0; }
+  .batter-pos   { font-size: 10px; color: #475569; margin-left: 5px; }
+  .batter-order { font-size: 11px; color: #475569; margin-right: 6px; }
+
+  /* heat cell */
+  .heat-cell {
+    border-radius: 5px;
+    padding: 5px 8px;
+    display: inline-block;
+    min-width: 46px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .no-data {
+    color: #334155;
+    font-size: 11px;
+  }
+  .sample-size {
+    font-size: 10px;
+    color: #475569;
+    margin-left: 3px;
+  }
+
+  /* pitcher header strip */
+  .pitcher-strip {
+    background: #1e293b;
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .pitcher-strip .label {
+    font-size: 11px;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+  }
+  .pitcher-strip .name {
+    font-size: 15px;
+    font-weight: 700;
+    color: #e2e8f0;
+  }
+  .side-label {
+    font-size: 13px;
+    font-weight: 700;
+    color: #3b82f6;
+    margin: 18px 0 6px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+  .no-lineup {
+    color: #475569;
+    font-size: 13px;
+    padding: 10px 0;
+  }
+
+  /* expand toggle */
+  .expand-btn {
+    background: none;
+    border: 1px solid #334155;
+    color: #94a3b8;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 5px;
+    cursor: pointer;
+    margin-top: 10px;
+    float: right;
+  }
+  .expand-btn:hover { color: white; border-color: #64748b; }
+  .heatmap-section { display: none; }
+  .heatmap-section.open { display: block; }
+</style>
 {% endblock %}
 
 {% block scripts %}
 <script>
 const statusEl = document.getElementById("status");
-const cardsEl = document.getElementById("cards");
-const dateEl = document.getElementById("game_date");
-const loadBtn = document.getElementById("loadBtn");
+const cardsEl  = document.getElementById("cards");
+const dateEl   = document.getElementById("game_date");
+const loadBtn  = document.getElementById("loadBtn");
 
-function gameCardHTML(g) {
+// ── Stat definitions ──────────────────────────────────────────────────────
+const ALL_STATS = [
+  { key: "avg",           label: "AVG",       fmt: v => v.toFixed(3),         lo: .150, hi: .350, invert: false },
+  { key: "obp",           label: "OBP",       fmt: v => v.toFixed(3),         lo: .200, hi: .400, invert: false },
+  { key: "slg",           label: "SLG",       fmt: v => v.toFixed(3),         lo: .200, hi: .550, invert: false },
+  { key: "hard_hit_pct",  label: "Hard Hit%", fmt: v => pct1(v),              lo: .20,  hi: .55,  invert: false },
+  { key: "avg_exit_velo", label: "Exit Velo", fmt: v => v.toFixed(1) + " mph",lo: 82,   hi: 96,   invert: false },
+  { key: "k_pct",         label: "K%",        fmt: v => pct1(v),              lo: .10,  hi: .40,  invert: true  },
+  { key: "bb_pct",        label: "BB%",       fmt: v => pct1(v),              lo: .04,  hi: .18,  invert: false },
+];
+
+let activeStats = new Set(["avg", "hard_hit_pct", "k_pct"]);
+
+function pct1(v) { return (v * 100).toFixed(1) + "%"; }
+
+// ── Color interpolation (red → neutral → green) ──────────────────────────
+function heatColor(value, lo, hi, invert) {
+  if (value === null || value === undefined) return null;
+  let t = (value - lo) / (hi - lo);
+  t = Math.max(0, Math.min(1, t));
+  if (invert) t = 1 - t;
+
+  // t=0 → red, t=0.5 → neutral (#1e293b), t=1 → green
+  if (t < 0.5) {
+    const u = t * 2;
+    const r = Math.round(180 + (30 - 180) * u);
+    const g = Math.round(40  + (41 - 40)  * u);
+    const b = Math.round(40  + (59 - 40)  * u);
+    return `rgb(${r},${g},${b})`;
+  } else {
+    const u = (t - 0.5) * 2;
+    const r = Math.round(30  + (34  - 30)  * u);
+    const g = Math.round(41  + (197 - 41)  * u);
+    const b = Math.round(59  + (94  - 59)  * u);
+    return `rgb(${r},${g},${b})`;
+  }
+}
+
+// ── Build pill toggles ────────────────────────────────────────────────────
+function buildPills(containerId) {
+  const wrap = document.getElementById(containerId);
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  for (const s of ALL_STATS) {
+    const pill = document.createElement("span");
+    pill.className = "stat-pill" + (activeStats.has(s.key) ? " active" : "");
+    pill.textContent = s.label;
+    pill.dataset.key = s.key;
+    pill.addEventListener("click", () => {
+      if (activeStats.has(s.key)) {
+        if (activeStats.size === 1) return; // always keep at least one
+        activeStats.delete(s.key);
+      } else {
+        activeStats.add(s.key);
+      }
+      refreshAllGrids();
+    });
+    wrap.appendChild(pill);
+  }
+}
+
+function refreshAllGrids() {
+  // Rebuild every visible grid + re-sync pills
+  document.querySelectorAll(".stat-pills").forEach(w => buildPills(w.id));
+  document.querySelectorAll(".bvp-grid[data-game]").forEach(table => {
+    const gameData = window._grids[table.dataset.game];
+    if (gameData) renderGrid(table, gameData.batters, gameData.spName);
+  });
+}
+
+window._grids = {};
+
+// ── Render one heatmap table ──────────────────────────────────────────────
+function renderGrid(table, batters, spName) {
+  const cols = ALL_STATS.filter(s => activeStats.has(s.key));
+
+  let html = `<thead><tr>
+    <th class="col-batter">Batter</th>
+    <th>PA</th>
+    ${cols.map(s => `<th>${s.label}</th>`).join("")}
+  </tr></thead><tbody>`;
+
+  for (const b of batters) {
+    html += `<tr><td class="col-batter">
+      <span class="batter-order">${b.batting_order}.</span>
+      <span class="batter-name">${b.player_name}</span>
+      ${b.position ? `<span class="batter-pos">${b.position}</span>` : ""}
+    </td>
+    <td><span class="no-data">${b.pa || 0}</span></td>`;
+
+    for (const s of cols) {
+      const val = b[s.key];
+      if (val === null || val === undefined || b.pa === 0) {
+        html += `<td><span class="no-data">—</span></td>`;
+      } else {
+        const bg    = heatColor(val, s.lo, s.hi, s.invert);
+        const style = bg ? `background:${bg};` : "";
+        html += `<td><span class="heat-cell" style="${style}">${s.fmt(val)}</span></td>`;
+      }
+    }
+    html += "</tr>";
+  }
+  html += "</tbody>";
+  table.innerHTML = html;
+}
+
+// ── Build one heatmap section (one side: away batters vs home SP, etc.) ──
+function heatmapSection(cardId, side, batters, spName, spId) {
+  const sectionId = `section-${cardId}-${side}`;
+  const tableId   = `grid-${cardId}-${side}`;
+  const pillsId   = `pills-${cardId}-${side}`;
+  const label     = side === "away" ? "Away Lineup" : "Home Lineup";
+
   return `
-    <div class="game-card">
+    <div class="side-label">${label} vs ${spName || "TBD"}</div>
+    ${!spId ? `<div class="no-lineup">No probable pitcher set — check back closer to game time.</div>` : ""}
+    ${batters.length === 0 ? `<div class="no-lineup">Lineup not yet posted.</div>` : `
+      <div class="stat-pills" id="${pillsId}"></div>
+      <div class="grid-wrap">
+        <table class="bvp-grid" id="${tableId}" data-game="${tableId}"></table>
+      </div>
+    `}
+  `;
+}
+
+// ── Build full game card ──────────────────────────────────────────────────
+function gameCardHTML(g) {
+  const cardId = `card-${g.game_pk}`;
+  return `
+    <div class="game-card" id="${cardId}">
       <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap;">
         ${g.away_logo ? `<img src="${g.away_logo}" alt="${g.away_team}" style="width:36px;height:36px;">` : ""}
         <div class="teams">${g.away_team} @ ${g.home_team}</div>
         ${g.home_logo ? `<img src="${g.home_logo}" alt="${g.home_team}" style="width:36px;height:36px;">` : ""}
+        <button class="expand-btn" onclick="toggleHeatmap('${cardId}', ${g.game_pk})">
+          Show Batter/Pitcher Grid ▾
+        </button>
       </div>
 
       <div class="stats">
@@ -39,35 +309,90 @@ function gameCardHTML(g) {
         Home SP: ${g.home_starting_pitcher || "TBD"}<br>
         Game PK: ${g.game_pk ?? "—"}
       </div>
+
+      <div class="heatmap-section" id="heatmap-${g.game_pk}">
+        <div id="heatmap-inner-${g.game_pk}">
+          <div class="stats" style="margin-top:12px; color:#475569;">Loading grid...</div>
+        </div>
+      </div>
     </div>
   `;
 }
 
+// ── Toggle + lazy-load heatmap ────────────────────────────────────────────
+async function toggleHeatmap(cardId, gamePk) {
+  const section = document.getElementById(`heatmap-${gamePk}`);
+  const btn     = document.querySelector(`#${cardId} .expand-btn`);
+
+  if (section.classList.contains("open")) {
+    section.classList.remove("open");
+    btn.textContent = "Show Batter/Pitcher Grid ▾";
+    return;
+  }
+
+  section.classList.add("open");
+  btn.textContent = "Hide Grid ▴";
+
+  // Already loaded?
+  if (section.dataset.loaded === "1") return;
+  section.dataset.loaded = "1";
+
+  try {
+    const res  = await fetch(`/api/matchup_grid?game_pk=${gamePk}`);
+    const data = await res.json();
+
+    if (!data.ok) {
+      document.getElementById(`heatmap-inner-${gamePk}`).innerHTML =
+        `<div class="no-lineup">Could not load grid: ${data.error || "unknown error"}</div>`;
+      return;
+    }
+
+    const inner = document.getElementById(`heatmap-inner-${gamePk}`);
+    inner.innerHTML =
+      heatmapSection(`${gamePk}-a`, "away", data.away_vs_home_sp, data.home_sp_name, data.home_sp_id) +
+      heatmapSection(`${gamePk}-h`, "home", data.home_vs_away_sp, data.away_sp_name, data.away_sp_id);
+
+    // Register grids for re-render on pill toggle
+    const awayTableId = `grid-${gamePk}-a-away`;
+    const homeTableId = `grid-${gamePk}-h-home`;
+
+    window._grids[awayTableId] = { batters: data.away_vs_home_sp, spName: data.home_sp_name };
+    window._grids[homeTableId] = { batters: data.home_vs_away_sp, spName: data.away_sp_name };
+
+    // Build pills
+    buildPills(`pills-${gamePk}-a-away`);
+    buildPills(`pills-${gamePk}-h-home`);
+
+    // Render tables
+    const awayTable = document.getElementById(awayTableId);
+    const homeTable = document.getElementById(homeTableId);
+    if (awayTable) renderGrid(awayTable, data.away_vs_home_sp, data.home_sp_name);
+    if (homeTable) renderGrid(homeTable, data.home_vs_away_sp, data.away_sp_name);
+
+  } catch (err) {
+    console.error(err);
+    document.getElementById(`heatmap-inner-${gamePk}`).innerHTML =
+      `<div class="no-lineup">Error loading grid.</div>`;
+  }
+}
+
+// ── Load matchup cards ────────────────────────────────────────────────────
 async function loadMatchups() {
   try {
     const d = dateEl.value;
     statusEl.textContent = "Loading...";
-    cardsEl.innerHTML = "";
+    cardsEl.innerHTML    = "";
+    window._grids        = {};
 
-    const res = await fetch(`/api/games?game_date=${encodeURIComponent(d)}`);
-    if (!res.ok) {
-      statusEl.textContent = `Request failed: ${res.status}`;
-      return;
-    }
+    const res  = await fetch(`/api/games?game_date=${encodeURIComponent(d)}`);
+    if (!res.ok) { statusEl.textContent = `Request failed: ${res.status}`; return; }
 
     const data = await res.json();
-    if (!data.ok || !data.games) {
-      statusEl.textContent = "Could not load matchups.";
-      return;
-    }
-
-    if (data.games.length === 0) {
-      statusEl.textContent = `No matchups found for ${d}.`;
-      return;
-    }
+    if (!data.ok || !data.games) { statusEl.textContent = "Could not load matchups."; return; }
+    if (data.games.length === 0) { statusEl.textContent = `No matchups found for ${d}.`; return; }
 
     statusEl.textContent = `Loaded ${data.count} games for ${d}.`;
-    cardsEl.innerHTML = data.games.map(gameCardHTML).join("");
+    cardsEl.innerHTML    = data.games.map(gameCardHTML).join("");
   } catch (err) {
     console.error(err);
     statusEl.textContent = "Error loading matchups.";

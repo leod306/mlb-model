@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -19,26 +20,30 @@ if os.getenv("DYNO") is None:
 DATABASE_URL = os.getenv("DATABASE_URL", "").replace("postgresql+psycopg2://", "postgresql://", 1)
 
 GAMES_TABLE = os.getenv("MLB_GAMES_TABLE", "games")
-PROB_TABLE = os.getenv("MLB_PROBABLES_TABLE", "game_probables")
-PRED_TABLE = os.getenv("MLB_PREDICTIONS_TABLE", "predictions")
+PROB_TABLE  = os.getenv("MLB_PROBABLES_TABLE", "game_probables")
+PRED_TABLE  = os.getenv("MLB_PREDICTIONS_TABLE", "predictions")
 
-SEASON = int(os.getenv("MLB_SEASON", "2026"))
-GAME_TYPES = os.getenv("MLB_GAME_TYPES", "S,R")
-WINDOW_DAYS = int(os.getenv("WINDOW_DAYS", "30"))
+SEASON             = int(os.getenv("MLB_SEASON", "2026"))
+GAME_TYPES         = os.getenv("MLB_GAME_TYPES", "S,R")
+WINDOW_DAYS        = int(os.getenv("WINDOW_DAYS", "30"))
 DEFAULT_TOTAL_LINE = float(os.getenv("DEFAULT_TOTAL_LINE", "8.5"))
 
-SLEEP = float(os.getenv("REQUEST_SLEEP_SECONDS", "0.05"))
+SLEEP        = float(os.getenv("REQUEST_SLEEP_SECONDS", "0.05"))
 HTTP_TIMEOUT = 25
 
-ML_DIR = os.path.join(PROJECT_ROOT, "ml")
-WIN_MODEL_PATH = os.getenv("MLB_WIN_MODEL_PATH", os.path.join(ML_DIR, "win_model.pkl"))
-RUN_MODEL_PATH = os.getenv("MLB_RUN_MODEL_PATH", os.path.join(ML_DIR, "run_model.pkl"))
-TOTAL_MODEL_PATH = os.getenv("MLB_TOTAL_MODEL_PATH", os.path.join(ML_DIR, "total_model.pkl"))
-FALLBACK_MODEL_PATH = os.getenv("MLB_MODEL_PATH", os.path.join(ML_DIR, "mlb_model.pkl"))
+ML_DIR             = os.path.join(PROJECT_ROOT, "ml")
+WIN_MODEL_PATH     = os.getenv("MLB_WIN_MODEL_PATH",   os.path.join(ML_DIR, "win_model.pkl"))
+RUN_MODEL_PATH     = os.getenv("MLB_RUN_MODEL_PATH",   os.path.join(ML_DIR, "run_model.pkl"))
+TOTAL_MODEL_PATH   = os.getenv("MLB_TOTAL_MODEL_PATH", os.path.join(ML_DIR, "total_model.pkl"))
+FALLBACK_MODEL_PATH = os.getenv("MLB_MODEL_PATH",      os.path.join(ML_DIR, "mlb_model.pkl"))
 
 MLB_BASE = "https://statsapi.mlb.com/api/v1"
 MLB_FEED = "https://statsapi.mlb.com/api/v1.1/game/{gamePk}/feed/live"
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def conn():
     if not DATABASE_URL:
@@ -56,57 +61,97 @@ def utc_dt(iso_z: str) -> datetime:
     return datetime.fromisoformat(iso_z.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
+def _safe_float(val) -> Optional[float]:
+    """Return a JSON-safe float or None. Handles nan, inf, None, numpy scalars."""
+    try:
+        if val is None:
+            return None
+        f = float(val)
+        return None if (math.isnan(f) or math.isinf(f)) else f
+    except (TypeError, ValueError):
+        return None
+
+
+def implied_moneyline(p: float) -> Optional[int]:
+    if p is None:
+        return None
+    try:
+        p = float(p)
+    except (TypeError, ValueError):
+        return None
+    if p <= 0.0 or p >= 1.0:
+        return None
+    if p >= 0.5:
+        return int(round(-100 * (p / (1 - p))))
+    return int(round(100 * ((1 - p) / p)))
+
+
+# ---------------------------------------------------------------------------
+# Table setup
+# ---------------------------------------------------------------------------
+
 def ensure_tables(cur):
     cur.execute(f"CREATE TABLE IF NOT EXISTS {GAMES_TABLE} (game_pk BIGINT PRIMARY KEY);")
-    cur.execute(f"CREATE TABLE IF NOT EXISTS {PROB_TABLE} (game_pk BIGINT PRIMARY KEY);")
-    cur.execute(f"CREATE TABLE IF NOT EXISTS {PRED_TABLE} (game_pk BIGINT PRIMARY KEY);")
+    cur.execute(f"CREATE TABLE IF NOT EXISTS {PROB_TABLE}  (game_pk BIGINT PRIMARY KEY);")
+    cur.execute(f"CREATE TABLE IF NOT EXISTS {PRED_TABLE}  (game_pk BIGINT PRIMARY KEY);")
 
-    cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS official_date DATE;")
-    cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS game_date_utc TIMESTAMPTZ;")
-    cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS season INT;")
-    cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS game_type TEXT;")
-    cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS status TEXT;")
-    cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS home_team TEXT;")
-    cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS away_team TEXT;")
-    cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS home_team_id INT;")
-    cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS away_team_id INT;")
+    for col, typedef in [
+        ("official_date",   "DATE"),
+        ("game_date_utc",   "TIMESTAMPTZ"),
+        ("season",          "INT"),
+        ("game_type",       "TEXT"),
+        ("status",          "TEXT"),
+        ("home_team",       "TEXT"),
+        ("away_team",       "TEXT"),
+        ("home_team_id",    "INT"),
+        ("away_team_id",    "INT"),
+    ]:
+        cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS {col} {typedef};")
     cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();")
     cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{GAMES_TABLE}_official_date ON {GAMES_TABLE}(official_date);")
 
-    cur.execute(f"ALTER TABLE {PROB_TABLE} ADD COLUMN IF NOT EXISTS official_date DATE;")
-    cur.execute(f"ALTER TABLE {PROB_TABLE} ADD COLUMN IF NOT EXISTS home_sp_id INT;")
-    cur.execute(f"ALTER TABLE {PROB_TABLE} ADD COLUMN IF NOT EXISTS away_sp_id INT;")
-    cur.execute(f"ALTER TABLE {PROB_TABLE} ADD COLUMN IF NOT EXISTS home_sp_name TEXT;")
-    cur.execute(f"ALTER TABLE {PROB_TABLE} ADD COLUMN IF NOT EXISTS away_sp_name TEXT;")
-    cur.execute(f"ALTER TABLE {PROB_TABLE} ADD COLUMN IF NOT EXISTS status TEXT;")
+    for col, typedef in [
+        ("official_date",  "DATE"),
+        ("home_sp_id",     "INT"),
+        ("away_sp_id",     "INT"),
+        ("home_sp_name",   "TEXT"),
+        ("away_sp_name",   "TEXT"),
+        ("status",         "TEXT"),
+    ]:
+        cur.execute(f"ALTER TABLE {PROB_TABLE} ADD COLUMN IF NOT EXISTS {col} {typedef};")
     cur.execute(f"ALTER TABLE {PROB_TABLE} ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();")
     cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{PROB_TABLE}_official_date ON {PROB_TABLE}(official_date);")
 
-    cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS official_date DATE;")
-    cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS home_team TEXT;")
-    cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS away_team TEXT;")
-
-    cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS prediction INT;")
-    cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS win_probability DOUBLE PRECISION;")
-
-    cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS home_win_prob DOUBLE PRECISION;")
-    cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS away_win_prob DOUBLE PRECISION;")
-    cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS home_ml_implied INT;")
-    cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS away_ml_implied INT;")
-    cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS run_diff_pred DOUBLE PRECISION;")
-    cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS total_runs_pred DOUBLE PRECISION;")
-    cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS ml_pick TEXT;")
-    cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS runline_pick TEXT;")
-    cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS ou_pick TEXT;")
+    for col, typedef in [
+        ("official_date",    "DATE"),
+        ("home_team",        "TEXT"),
+        ("away_team",        "TEXT"),
+        ("prediction",       "INT"),
+        ("win_probability",  "DOUBLE PRECISION"),
+        ("home_win_prob",    "DOUBLE PRECISION"),
+        ("away_win_prob",    "DOUBLE PRECISION"),
+        ("home_ml_implied",  "INT"),
+        ("away_ml_implied",  "INT"),
+        ("run_diff_pred",    "DOUBLE PRECISION"),
+        ("total_runs_pred",  "DOUBLE PRECISION"),
+        ("ml_pick",          "TEXT"),
+        ("runline_pick",     "TEXT"),
+        ("ou_pick",          "TEXT"),
+    ]:
+        cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS {col} {typedef};")
     cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();")
     cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{PRED_TABLE}_official_date ON {PRED_TABLE}(official_date);")
 
+
+# ---------------------------------------------------------------------------
+# Schedule + probables upsert
+# ---------------------------------------------------------------------------
 
 def team_map(season: int) -> Dict[int, str]:
     data = get_json(f"{MLB_BASE}/teams", {"sportId": 1, "season": season})
     out: Dict[int, str] = {}
     for t in data.get("teams", []) or []:
-        tid = t.get("id")
+        tid  = t.get("id")
         abbr = t.get("abbreviation") or t.get("teamCode") or t.get("fileCode") or t.get("name")
         if tid and abbr:
             out[int(tid)] = str(abbr)
@@ -117,12 +162,12 @@ def upsert_schedule(cur, start: date, end: date, tmap: Dict[int, str]) -> int:
     data = get_json(
         f"{MLB_BASE}/schedule",
         {
-            "sportId": 1,
-            "season": SEASON,
+            "sportId":   1,
+            "season":    SEASON,
             "gameTypes": GAME_TYPES,
             "startDate": start.isoformat(),
-            "endDate": end.isoformat(),
-            "hydrate": "team,venue",
+            "endDate":   end.isoformat(),
+            "hydrate":   "team,venue",
         },
     )
 
@@ -133,22 +178,19 @@ def upsert_schedule(cur, start: date, end: date, tmap: Dict[int, str]) -> int:
             away = (((g.get("teams") or {}).get("away") or {}).get("team") or {})
             if not home.get("id") or not away.get("id"):
                 continue
-
-            rows.append(
-                (
-                    int(g["gamePk"]),
-                    (g.get("officialDate") or d.get("date")),
-                    utc_dt(g["gameDate"]),
-                    SEASON,
-                    str(g.get("gameType") or ""),
-                    str((g.get("status") or {}).get("detailedState") or ""),
-                    int(home["id"]),
-                    int(away["id"]),
-                    str(home.get("abbreviation") or tmap.get(int(home["id"])) or home.get("name") or home["id"]),
-                    str(away.get("abbreviation") or tmap.get(int(away["id"])) or away.get("name") or away["id"]),
-                    datetime.now(timezone.utc),
-                )
-            )
+            rows.append((
+                int(g["gamePk"]),
+                (g.get("officialDate") or d.get("date")),
+                utc_dt(g["gameDate"]),
+                SEASON,
+                str(g.get("gameType") or ""),
+                str((g.get("status") or {}).get("detailedState") or ""),
+                int(home["id"]),
+                int(away["id"]),
+                str(home.get("abbreviation") or tmap.get(int(home["id"])) or home.get("name") or home["id"]),
+                str(away.get("abbreviation") or tmap.get(int(away["id"])) or away.get("name") or away["id"]),
+                datetime.now(timezone.utc),
+            ))
 
     if not rows:
         return 0
@@ -176,18 +218,18 @@ def upsert_schedule(cur, start: date, end: date, tmap: Dict[int, str]) -> int:
 
 
 def parse_probables(payload: Dict[str, Any]) -> Tuple[Optional[int], Optional[str], Optional[int], Optional[str], Optional[str]]:
-    gd = payload.get("gameData") or {}
-    prob = gd.get("probablePitchers") or {}
+    gd     = payload.get("gameData") or {}
+    prob   = gd.get("probablePitchers") or {}
     players = gd.get("players") or {}
     status = (gd.get("status") or {}).get("detailedState") or None
 
     def one(side: str) -> Tuple[Optional[int], Optional[str]]:
-        p = prob.get(side) or {}
+        p   = prob.get(side) or {}
         pid = p.get("id")
         if not pid:
             return None, None
         pid = int(pid)
-        pl = players.get(f"ID{pid}") or {}
+        pl  = players.get(f"ID{pid}") or {}
         name = pl.get("fullName") or p.get("fullName")
         return pid, name
 
@@ -209,7 +251,7 @@ def upsert_probables(cur, start: date, end: date) -> int:
     games = cur.fetchall()
 
     rows = []
-    now = datetime.now(timezone.utc)
+    now  = datetime.now(timezone.utc)
 
     for game_pk, off_date in games:
         try:
@@ -247,16 +289,9 @@ def upsert_probables(cur, start: date, end: date) -> int:
     return len(rows)
 
 
-def implied_moneyline(p: float) -> Optional[int]:
-    if p is None:
-        return None
-    p = float(p)
-    if p <= 0.0 or p >= 1.0:
-        return None
-    if p >= 0.5:
-        return int(round(-100 * (p / (1 - p))))
-    return int(round(100 * ((1 - p) / p)))
-
+# ---------------------------------------------------------------------------
+# Model loading
+# ---------------------------------------------------------------------------
 
 def load_models() -> Tuple[Any, Any, Any]:
     win = joblib.load(WIN_MODEL_PATH) if os.path.exists(WIN_MODEL_PATH) else joblib.load(FALLBACK_MODEL_PATH)
@@ -264,39 +299,83 @@ def load_models() -> Tuple[Any, Any, Any]:
         raise FileNotFoundError(f"Missing run model: {RUN_MODEL_PATH}")
     if not os.path.exists(TOTAL_MODEL_PATH):
         raise FileNotFoundError(f"Missing total model: {TOTAL_MODEL_PATH}")
-    run = joblib.load(RUN_MODEL_PATH)
+    run   = joblib.load(RUN_MODEL_PATH)
     total = joblib.load(TOTAL_MODEL_PATH)
     return win, run, total
 
 
 def align_to_model(df: pd.DataFrame, model: Any) -> pd.DataFrame:
+    """
+    Select and order only the columns the model was trained on.
+    Missing columns are filled with 0. Extra columns are dropped.
+    """
     feat_cols = getattr(model, "feature_names_in_", None)
     drop = {
         "game_pk", "official_date", "home_team", "away_team",
         "home_team_id", "away_team_id", "home_sp_id", "away_sp_id",
-        "home_sp_name", "away_sp_name"
+        "home_sp_name", "away_sp_name",
     }
     if feat_cols is None:
         return df[[c for c in df.columns if c not in drop]].copy()
 
     X = pd.DataFrame(index=df.index)
     for c in feat_cols:
-        X[c] = df[c] if c in df.columns else 0
+        X[c] = pd.to_numeric(df[c], errors="coerce").fillna(0) if c in df.columns else 0
     return X
 
 
+# ---------------------------------------------------------------------------
+# Feature builder  ← THIS IS THE KEY FIX
+# ---------------------------------------------------------------------------
+
 def build_features_for_date(cur, target: date) -> pd.DataFrame:
+    """
+    Build the 8 model features for every game on `target` date.
+
+    Features (matching train_model.py):
+        era_diff, whip_diff,
+        home_last10_runs_scored, away_last10_runs_scored,
+        home_last10_runs_allowed, away_last10_runs_allowed,
+        home_last10_run_diff, away_last10_run_diff
+    """
     cur.execute(
         f"""
-        SELECT g.game_pk, g.official_date, g.home_team, g.away_team,
-               g.home_team_id, g.away_team_id,
-               p.home_sp_id, p.away_sp_id, p.home_sp_name, p.away_sp_name
+        SELECT
+            g.game_pk,
+            g.official_date,
+            g.home_team,
+            g.away_team,
+            g.home_team_id,
+            g.away_team_id,
+            p.home_sp_id,
+            p.away_sp_id,
+            p.home_sp_name,
+            p.away_sp_name,
+            -- rolling team stats (populated by build_dataset / rolling update)
+            g.home_last10_runs_scored,
+            g.away_last10_runs_scored,
+            g.home_last10_runs_allowed,
+            g.away_last10_runs_allowed,
+            g.home_last10_run_diff,
+            g.away_last10_run_diff,
+            -- pitcher ERA/WHIP joined from pitchers table
+            hp.era   AS home_era,
+            hp.whip  AS home_whip,
+            ap.era   AS away_era,
+            ap.whip  AS away_whip
         FROM {GAMES_TABLE} g
-        LEFT JOIN {PROB_TABLE} p ON p.game_pk = g.game_pk
+        LEFT JOIN {PROB_TABLE} p
+            ON p.game_pk = g.game_pk
+        LEFT JOIN pitchers hp
+            ON LOWER(TRIM(hp.pitcher_name)) = LOWER(TRIM(p.home_sp_name))
+            AND hp.season = %s
+        LEFT JOIN pitchers ap
+            ON LOWER(TRIM(ap.pitcher_name)) = LOWER(TRIM(p.away_sp_name))
+            AND ap.season = %s
         WHERE g.official_date = %s
         ORDER BY g.game_pk
         """,
-        (target,),
+        (SEASON, SEASON, target),
     )
     rows = cur.fetchall()
     if not rows:
@@ -305,27 +384,61 @@ def build_features_for_date(cur, target: date) -> pd.DataFrame:
     df = pd.DataFrame(rows, columns=[
         "game_pk", "official_date", "home_team", "away_team",
         "home_team_id", "away_team_id",
-        "home_sp_id", "away_sp_id", "home_sp_name", "away_sp_name"
+        "home_sp_id", "away_sp_id", "home_sp_name", "away_sp_name",
+        "home_last10_runs_scored", "away_last10_runs_scored",
+        "home_last10_runs_allowed", "away_last10_runs_allowed",
+        "home_last10_run_diff", "away_last10_run_diff",
+        "home_era", "home_whip", "away_era", "away_whip",
     ])
+
+    # League-average ERA/WHIP fallback for unknown pitchers
+    cur.execute(
+        "SELECT AVG(era), AVG(whip) FROM pitchers WHERE season = %s",
+        (SEASON,),
+    )
+    row = cur.fetchone()
+    league_era  = float(row[0]) if row and row[0] is not None else 4.20
+    league_whip = float(row[1]) if row and row[1] is not None else 1.30
+
+    df["home_era"]  = pd.to_numeric(df["home_era"],  errors="coerce").fillna(league_era)
+    df["away_era"]  = pd.to_numeric(df["away_era"],  errors="coerce").fillna(league_era)
+    df["home_whip"] = pd.to_numeric(df["home_whip"], errors="coerce").fillna(league_whip)
+    df["away_whip"] = pd.to_numeric(df["away_whip"], errors="coerce").fillna(league_whip)
+
+    df["era_diff"]  = df["home_era"]  - df["away_era"]
+    df["whip_diff"] = df["home_whip"] - df["away_whip"]
+
+    # Rolling stats: fill with 0.0 when not yet available (spring training / early season)
+    rolling_cols = [
+        "home_last10_runs_scored", "away_last10_runs_scored",
+        "home_last10_runs_allowed", "away_last10_runs_allowed",
+        "home_last10_run_diff",    "away_last10_run_diff",
+    ]
+    for col in rolling_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
     df["has_home_sp"] = df["home_sp_id"].notna().astype(int)
     df["has_away_sp"] = df["away_sp_id"].notna().astype(int)
+
     return df
 
+
+# ---------------------------------------------------------------------------
+# Save predictions
+# ---------------------------------------------------------------------------
 
 def save_predictions(cur, out: pd.DataFrame) -> int:
     if out.empty:
         return 0
 
-    rows = list(out[
-        [
-            "game_pk", "official_date", "away_team", "home_team",
-            "prediction", "win_probability",
-            "home_win_prob", "away_win_prob",
-            "home_ml_implied", "away_ml_implied",
-            "run_diff_pred", "total_runs_pred",
-            "ml_pick", "runline_pick", "ou_pick",
-        ]
-    ].itertuples(index=False, name=None))
+    rows = list(out[[
+        "game_pk", "official_date", "away_team", "home_team",
+        "prediction", "win_probability",
+        "home_win_prob", "away_win_prob",
+        "home_ml_implied", "away_ml_implied",
+        "run_diff_pred", "total_runs_pred",
+        "ml_pick", "runline_pick", "ou_pick",
+    ]].itertuples(index=False, name=None))
 
     rows2 = [r + (datetime.now(timezone.utc),) for r in rows]
 
@@ -361,6 +474,10 @@ def save_predictions(cur, out: pd.DataFrame) -> int:
     return len(rows)
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main():
     print("PROJECT_ROOT =", PROJECT_ROOT)
     print("GAMES_TABLE  =", GAMES_TABLE)
@@ -371,7 +488,7 @@ def main():
 
     today = datetime.now(timezone.utc).date()
     start = today
-    end = today + timedelta(days=WINDOW_DAYS)
+    end   = today + timedelta(days=WINDOW_DAYS)
 
     c = conn()
     try:
@@ -379,11 +496,14 @@ def main():
         with c.cursor() as cur:
             ensure_tables(cur)
 
-            tmap = team_map(SEASON)
+            tmap    = team_map(SEASON)
             n_sched = upsert_schedule(cur, start, end, tmap)
-            n_prob = upsert_probables(cur, start, end)
+            n_prob  = upsert_probables(cur, start, end)
 
-            cur.execute(f"SELECT MIN(official_date) FROM {GAMES_TABLE} WHERE official_date >= %s", (today,))
+            cur.execute(
+                f"SELECT MIN(official_date) FROM {GAMES_TABLE} WHERE official_date >= %s",
+                (today,),
+            )
             slate = cur.fetchone()[0]
             if not slate:
                 c.commit()
@@ -402,44 +522,46 @@ def main():
 
             if hasattr(win_model, "predict_proba"):
                 p = win_model.predict_proba(X_win)
-                home_prob = p[:, 1] if p.shape[1] > 1 else p[:, 0]
+                home_prob_raw = p[:, 1] if p.shape[1] > 1 else p[:, 0]
             else:
-                home_prob = win_model.predict(X_win)
+                home_prob_raw = win_model.predict(X_win)
 
-            home_prob = [float(x) for x in home_prob]
-            away_prob = [float(1 - x) for x in home_prob]
-            prediction = [1 if hp >= 0.5 else 0 for hp in home_prob]
-            run_diff = [float(x) for x in run_model.predict(X_run)]
-            total_runs = [float(x) for x in total_model.predict(X_tot)]
+            # Sanitize all model outputs — nan/inf → safe fallback
+            home_prob  = [_safe_float(x) or 0.5  for x in home_prob_raw]
+            away_prob  = [round(1.0 - hp, 6)      for hp in home_prob]
+            prediction = [1 if hp >= 0.5 else 0   for hp in home_prob]
+            run_diff   = [_safe_float(x) or 0.0   for x in run_model.predict(X_run)]
+            total_runs = [_safe_float(x) or 0.0   for x in total_model.predict(X_tot)]
 
-            ml_pick = ["HOME" if hp >= 0.5 else "AWAY" for hp in home_prob]
-            runline_pick = ["HOME -1.5" if rd >= 1.5 else "AWAY +1.5" for rd in run_diff]
-            ou_pick = ["OVER" if tr >= DEFAULT_TOTAL_LINE else "UNDER" for tr in total_runs]
+            ml_pick       = ["HOME" if hp >= 0.5  else "AWAY"      for hp in home_prob]
+            runline_pick  = ["HOME -1.5" if rd >= 1.5 else "AWAY +1.5" for rd in run_diff]
+            ou_pick       = ["OVER" if tr >= DEFAULT_TOTAL_LINE else "UNDER" for tr in total_runs]
 
             out = pd.DataFrame({
-                "game_pk": base["game_pk"].astype(int),
-                "official_date": pd.to_datetime(base["official_date"]).dt.date,
-                "away_team": base["away_team"].astype(str),
-                "home_team": base["home_team"].astype(str),
-                "prediction": prediction,
+                "game_pk":        base["game_pk"].astype(int),
+                "official_date":  pd.to_datetime(base["official_date"]).dt.date,
+                "away_team":      base["away_team"].astype(str),
+                "home_team":      base["home_team"].astype(str),
+                "prediction":     prediction,
                 "win_probability": home_prob,
-                "home_win_prob": home_prob,
-                "away_win_prob": away_prob,
+                "home_win_prob":  home_prob,
+                "away_win_prob":  away_prob,
                 "home_ml_implied": [implied_moneyline(x) for x in home_prob],
                 "away_ml_implied": [implied_moneyline(x) for x in away_prob],
-                "run_diff_pred": run_diff,
+                "run_diff_pred":  run_diff,
                 "total_runs_pred": total_runs,
-                "ml_pick": ml_pick,
-                "runline_pick": runline_pick,
-                "ou_pick": ou_pick,
+                "ml_pick":        ml_pick,
+                "runline_pick":   runline_pick,
+                "ou_pick":        ou_pick,
             })
 
             n_saved = save_predictions(cur, out)
             c.commit()
 
-            print(f"Schedule upserted: {n_sched}")
-            print(f"Probables upserted: {n_prob}")
-            print(f"Slate date: {slate} | Predictions saved: {n_saved}")
+            print(f"Schedule upserted:   {n_sched}")
+            print(f"Probables upserted:  {n_prob}")
+            print(f"Slate date:          {slate}")
+            print(f"Predictions saved:   {n_saved}")
 
     except Exception:
         c.rollback()
