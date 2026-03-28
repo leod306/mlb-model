@@ -16,7 +16,7 @@ if os.getenv("DYNO") is None:
 DATABASE_URL = os.getenv("DATABASE_URL", "").replace("postgresql+psycopg2://", "postgresql://", 1)
 
 SEASON = int(os.getenv("MLB_SEASON", "2026"))
-GAME_TYPES = os.getenv("MLB_GAME_TYPES", "S,R")
+GAME_TYPES = os.getenv("MLB_GAME_TYPES", "R")
 GAMES_TABLE = os.getenv("MLB_GAMES_TABLE", "games")
 
 MLB_BASE = "https://statsapi.mlb.com/api/v1"

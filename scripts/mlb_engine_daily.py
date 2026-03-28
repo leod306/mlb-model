@@ -427,21 +427,83 @@ def build_features_for_date(cur, target: date) -> pd.DataFrame:
 # Save predictions
 # ---------------------------------------------------------------------------
 
-def save_predictions(cur, out: pd.DataFrame) -> int:
+# ---------------------------------------------------------------------------
+# REPLACE the existing save_predictions function in mlb_engine_daily.py
+# with this version. Adds market odds columns to the upsert.
+# ---------------------------------------------------------------------------
+
+def save_predictions(cur, out: "pd.DataFrame") -> int:
     if out.empty:
         return 0
 
-    rows = list(out[[
-        "game_pk", "official_date", "away_team", "home_team",
-        "prediction", "win_probability",
-        "home_win_prob", "away_win_prob",
-        "home_ml_implied", "away_ml_implied",
-        "run_diff_pred", "total_runs_pred",
-        "ml_pick", "runline_pick", "ou_pick",
-    ]].itertuples(index=False, name=None))
+    # Ensure new market odds columns exist in predictions table
+    new_cols = [
+        ("market_home_prob",  "DOUBLE PRECISION"),
+        ("market_away_prob",  "DOUBLE PRECISION"),
+        ("market_total_line", "DOUBLE PRECISION"),
+        ("market_home_ml",    "INT"),
+        ("market_away_ml",    "INT"),
+        ("best_home_ml",      "INT"),
+        ("best_away_ml",      "INT"),
+        ("model_edge",        "DOUBLE PRECISION"),
+    ]
+    for col, dtype in new_cols:
+        cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS {col} {dtype};")
 
-    rows2 = [r + (datetime.now(timezone.utc),) for r in rows]
+    # Helper to safely get optional column value
+    def safe_col(row, col):
+        try:
+            val = row.get(col)
+            if val is None:
+                return None
+            import math
+            f = float(val)
+            return None if (math.isnan(f) or math.isinf(f)) else f
+        except Exception:
+            return None
 
+    def safe_int_col(row, col):
+        try:
+            val = row.get(col)
+            if val is None:
+                return None
+            import math
+            f = float(val)
+            return None if (math.isnan(f) or math.isinf(f)) else int(f)
+        except Exception:
+            return None
+
+    rows = []
+    for _, row in out.iterrows():
+        rows.append((
+            int(row["game_pk"]),
+            row["official_date"],
+            str(row["away_team"]),
+            str(row["home_team"]),
+            int(row["prediction"]) if row.get("prediction") is not None else None,
+            safe_col(row, "win_probability"),
+            safe_col(row, "home_win_prob"),
+            safe_col(row, "away_win_prob"),
+            safe_int_col(row, "home_ml_implied"),
+            safe_int_col(row, "away_ml_implied"),
+            safe_col(row, "run_diff_pred"),
+            safe_col(row, "total_runs_pred"),
+            str(row["ml_pick"]) if row.get("ml_pick") else None,
+            str(row["runline_pick"]) if row.get("runline_pick") else None,
+            str(row["ou_pick"]) if row.get("ou_pick") else None,
+            # Market odds columns (None if no odds API key or no match)
+            safe_col(row, "market_home_prob"),
+            safe_col(row, "market_away_prob"),
+            safe_col(row, "market_total_line"),
+            safe_int_col(row, "market_home_ml"),
+            safe_int_col(row, "market_away_ml"),
+            safe_int_col(row, "best_home_ml"),
+            safe_int_col(row, "best_away_ml"),
+            safe_col(row, "model_edge"),
+            __import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+        ))
+
+    from psycopg2.extras import execute_values
     sql = f"""
     INSERT INTO {PRED_TABLE} (
       game_pk, official_date, away_team, home_team,
@@ -450,27 +512,39 @@ def save_predictions(cur, out: pd.DataFrame) -> int:
       home_ml_implied, away_ml_implied,
       run_diff_pred, total_runs_pred,
       ml_pick, runline_pick, ou_pick,
+      market_home_prob, market_away_prob, market_total_line,
+      market_home_ml, market_away_ml,
+      best_home_ml, best_away_ml,
+      model_edge,
       updated_at
     )
     VALUES %s
     ON CONFLICT (game_pk) DO UPDATE SET
-      official_date=EXCLUDED.official_date,
-      away_team=EXCLUDED.away_team,
-      home_team=EXCLUDED.home_team,
-      prediction=EXCLUDED.prediction,
-      win_probability=EXCLUDED.win_probability,
-      home_win_prob=EXCLUDED.home_win_prob,
-      away_win_prob=EXCLUDED.away_win_prob,
-      home_ml_implied=EXCLUDED.home_ml_implied,
-      away_ml_implied=EXCLUDED.away_ml_implied,
-      run_diff_pred=EXCLUDED.run_diff_pred,
-      total_runs_pred=EXCLUDED.total_runs_pred,
-      ml_pick=EXCLUDED.ml_pick,
-      runline_pick=EXCLUDED.runline_pick,
-      ou_pick=EXCLUDED.ou_pick,
-      updated_at=NOW();
+      official_date     = EXCLUDED.official_date,
+      away_team         = EXCLUDED.away_team,
+      home_team         = EXCLUDED.home_team,
+      prediction        = EXCLUDED.prediction,
+      win_probability   = EXCLUDED.win_probability,
+      home_win_prob     = EXCLUDED.home_win_prob,
+      away_win_prob     = EXCLUDED.away_win_prob,
+      home_ml_implied   = EXCLUDED.home_ml_implied,
+      away_ml_implied   = EXCLUDED.away_ml_implied,
+      run_diff_pred     = EXCLUDED.run_diff_pred,
+      total_runs_pred   = EXCLUDED.total_runs_pred,
+      ml_pick           = EXCLUDED.ml_pick,
+      runline_pick      = EXCLUDED.runline_pick,
+      ou_pick           = EXCLUDED.ou_pick,
+      market_home_prob  = EXCLUDED.market_home_prob,
+      market_away_prob  = EXCLUDED.market_away_prob,
+      market_total_line = EXCLUDED.market_total_line,
+      market_home_ml    = EXCLUDED.market_home_ml,
+      market_away_ml    = EXCLUDED.market_away_ml,
+      best_home_ml      = EXCLUDED.best_home_ml,
+      best_away_ml      = EXCLUDED.best_away_ml,
+      model_edge        = EXCLUDED.model_edge,
+      updated_at        = NOW();
     """
-    execute_values(cur, sql, rows2, page_size=1000)
+    execute_values(cur, sql, rows, page_size=1000)
     return len(rows)
 
 

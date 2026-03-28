@@ -14,16 +14,108 @@
   <button id="loadBtn" type="button">Load Predictions</button>
 </div>
 
-<div id="status" class="stats">Click “Load Predictions”.</div>
+<div id="status" class="stats">Click "Load Predictions".</div>
 <div id="cards"></div>
+
+<style>
+  .picks-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 14px;
+  }
+  .pick-badge {
+    padding: 5px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 700;
+    background: #0f172a;
+    border: 1px solid #334155;
+    color: #e2e8f0;
+  }
+  .pick-badge.home  { border-color: #3b82f6; color: #3b82f6; }
+  .pick-badge.away  { border-color: #f59e0b; color: #f59e0b; }
+  .pick-badge.over  { border-color: #10b981; color: #10b981; }
+  .pick-badge.under { border-color: #ef4444; color: #ef4444; }
+
+  .odds-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 14px;
+  }
+  .odds-box {
+    background: #0f172a;
+    border-radius: 8px;
+    padding: 10px 14px;
+    border: 1px solid #1e293b;
+  }
+  .odds-box .label {
+    font-size: 10px;
+    color: #475569;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    margin-bottom: 4px;
+  }
+  .odds-box .value {
+    font-size: 15px;
+    font-weight: 700;
+    color: #e2e8f0;
+  }
+  .odds-box .sub {
+    font-size: 11px;
+    color: #64748b;
+    margin-top: 2px;
+  }
+
+  .edge-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 700;
+    margin-left: 8px;
+  }
+  .edge-pos { background: #064e3b; color: #34d399; }
+  .edge-neg { background: #450a0a; color: #f87171; }
+  .edge-neu { background: #1e293b; color: #94a3b8; }
+
+  .section-label {
+    font-size: 11px;
+    color: #475569;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    margin: 14px 0 6px;
+  }
+
+  .market-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .ml-chip {
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    background: #1e293b;
+    color: #94a3b8;
+  }
+  .ml-chip.best {
+    background: #1e3a5f;
+    color: #60a5fa;
+  }
+</style>
 {% endblock %}
 
 {% block scripts %}
 <script>
 const statusEl = document.getElementById("status");
-const cardsEl = document.getElementById("cards");
-const dateEl = document.getElementById("game_date");
-const loadBtn = document.getElementById("loadBtn");
+const cardsEl  = document.getElementById("cards");
+const dateEl   = document.getElementById("game_date");
+const loadBtn  = document.getElementById("loadBtn");
 
 function pct(x) {
   if (x === null || x === undefined || isNaN(Number(x))) return "—";
@@ -41,45 +133,116 @@ function fmtML(x) {
   return n > 0 ? `+${n}` : `${n}`;
 }
 
+function edgeBadge(edge) {
+  if (edge === null || edge === undefined || isNaN(Number(edge))) return "";
+  const e = Number(edge);
+  const pctStr = (e >= 0 ? "+" : "") + Math.round(e * 1000) / 10 + "%";
+  const cls = e >= 0.03 ? "edge-pos" : e <= -0.03 ? "edge-neg" : "edge-neu";
+  return `<span class="edge-badge ${cls}">${pctStr} edge</span>`;
+}
+
+function pickClass(pick) {
+  if (!pick) return "";
+  const p = pick.toUpperCase();
+  if (p === "HOME" || p.startsWith("HOME")) return "home";
+  if (p === "AWAY" || p.startsWith("AWAY")) return "away";
+  if (p === "OVER") return "over";
+  if (p === "UNDER") return "under";
+  return "";
+}
+
 function cardHTML(p) {
-  const winPct = pct(p.home_win_prob);
+  const winPct   = pct(p.home_win_prob);
   const barWidth = typeof winPct === "number" ? Math.max(0, Math.min(100, winPct)) : 0;
+  const hasMkt =
+  p.market_home_prob != null ||
+  p.market_away_prob != null ||
+  p.market_total_line != null ||
+  p.market_home_ml != null ||
+  p.market_away_ml != null ||
+  p.best_home_ml != null ||
+  p.best_away_ml != null;
+  const mktPct   = hasMkt ? pct(p.market_home_prob) : null;
 
   return `
     <div class="game-card">
+
+      <!-- Teams + logos -->
       <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap;">
         ${p.away_logo ? `<img src="${p.away_logo}" alt="${p.away_team}" style="width:36px;height:36px;">` : ""}
         <div class="teams">${p.away_team || "Away"} @ ${p.home_team || "Home"}</div>
         ${p.home_logo ? `<img src="${p.home_logo}" alt="${p.home_team}" style="width:36px;height:36px;">` : ""}
       </div>
 
+      <!-- Starters -->
       <div class="stats">
         Away SP: ${p.away_starting_pitcher || "TBD"}<br>
         Home SP: ${p.home_starting_pitcher || "TBD"}
       </div>
 
-      ${
-        p.ok ? `
-          <div class="stats" style="margin-top:14px;">
-            ML Pick: ${p.ml_pick || "—"}<br>
-            Run Line Pick: ${p.runline_pick || "—"}<br>
-            Total Pick: ${p.ou_pick || "—"}<br>
-            Home Win %: ${winPct === "—" ? "—" : winPct + "%"}<br>
-            Home Fair ML: ${fmtML(p.home_moneyline_fair)}<br>
-            Away Fair ML: ${fmtML(p.away_moneyline_fair)}<br>
-            Predicted Total: ${fmtNum(p.pred_total_runs)}<br>
-            Predicted Run Diff: ${fmtNum(p.pred_run_diff)}
-          </div>
+      ${p.ok ? `
 
-          <div class="confidence-bar">
-            <div class="confidence-fill" style="width:${barWidth}%"></div>
+        <!-- Pick badges -->
+        <div class="picks-row">
+          <span class="pick-badge ${pickClass(p.ml_pick)}">ML: ${p.ml_pick || "—"}</span>
+          <span class="pick-badge ${pickClass(p.runline_pick)}">RL: ${p.runline_pick || "—"}</span>
+          <span class="pick-badge ${pickClass(p.ou_pick)}">O/U: ${p.ou_pick || "—"}</span>
+        </div>
+
+        <!-- Model vs Market odds grid -->
+        <div class="section-label">Model</div>
+        <div class="odds-grid">
+          <div class="odds-box">
+            <div class="label">Home Win %</div>
+            <div class="value">${winPct === "—" ? "—" : winPct + "%"}${edgeBadge(p.model_edge)}</div>
+            <div class="sub">Fair ML: ${fmtML(p.home_moneyline_fair)}</div>
+          </div>
+          <div class="odds-box">
+            <div class="label">Away Win %</div>
+            <div class="value">${winPct === "—" ? "—" : Math.round((100 - Number(winPct)) * 10) / 10 + "%"}</div>
+            <div class="sub">Fair ML: ${fmtML(p.away_moneyline_fair)}</div>
+          </div>
+          <div class="odds-box">
+            <div class="label">Predicted Total</div>
+            <div class="value">${fmtNum(p.pred_total_runs)}</div>
+            <div class="sub">Run diff: ${fmtNum(p.pred_run_diff)}</div>
+          </div>
+        </div>
+
+        ${hasMkt ? `
+          <div class="section-label">Market (Vegas Consensus)</div>
+          <div class="odds-grid">
+            <div class="odds-box">
+              <div class="label">Home Implied %</div>
+              <div class="value">${mktPct !== null ? mktPct + "%" : "—"}</div>
+              <div class="sub">Consensus ML: ${fmtML(p.market_home_ml)}</div>
+            </div>
+            <div class="odds-box">
+              <div class="label">Away Implied %</div>
+              <div class="value">${mktPct !== null ? Math.round((100 - Number(mktPct)) * 10) / 10 + "%" : "—"}</div>
+              <div class="sub">Consensus ML: ${fmtML(p.market_away_ml)}</div>
+            </div>
+            <div class="odds-box">
+              <div class="label">O/U Line</div>
+              <div class="value">${p.market_total_line !== null ? p.market_total_line : "—"}</div>
+              <div class="sub">Best home: ${fmtML(p.best_home_ml)} | Away: ${fmtML(p.best_away_ml)}</div>
+            </div>
           </div>
         ` : `
-          <div class="stats" style="margin-top:14px;">
-            No prediction available${p.error ? `: ${p.error}` : "."}
+          <div class="stats" style="margin-top:10px; color:#475569; font-size:12px;">
+            No market odds available for this game.
           </div>
-        `
-      }
+        `}
+
+        <div class="confidence-bar">
+          <div class="confidence-fill" style="width:${barWidth}%"></div>
+        </div>
+
+      ` : `
+        <div class="stats" style="margin-top:14px;">
+          No prediction available${p.error ? `: ${p.error}` : "."}
+        </div>
+      `}
     </div>
   `;
 }
@@ -88,29 +251,20 @@ async function loadPredictions() {
   try {
     const d = dateEl.value;
     statusEl.textContent = "Loading...";
-    cardsEl.innerHTML = "";
+    cardsEl.innerHTML    = "";
 
-    const res = await fetch(`/api/predict/today?game_date=${encodeURIComponent(d)}`);
-
-    if (!res.ok) {
-      statusEl.textContent = `Request failed: ${res.status}`;
-      return;
-    }
+    const res  = await fetch(`/api/predict/today?game_date=${encodeURIComponent(d)}`);
+    if (!res.ok) { statusEl.textContent = `Request failed: ${res.status}`; return; }
 
     const data = await res.json();
-
-    if (!data.ok) {
-      statusEl.textContent = "API returned an error.";
-      return;
-    }
-
+    if (!data.ok) { statusEl.textContent = "API returned an error."; return; }
     if (!data.predictions || data.predictions.length === 0) {
       statusEl.textContent = `No predictions found for ${d}.`;
       return;
     }
 
     statusEl.textContent = `Loaded ${data.count} games for ${d}.`;
-    cardsEl.innerHTML = data.predictions.map(cardHTML).join("");
+    cardsEl.innerHTML    = data.predictions.map(cardHTML).join("");
   } catch (err) {
     console.error(err);
     statusEl.textContent = "JavaScript error loading predictions.";

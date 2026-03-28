@@ -26,52 +26,73 @@ else:
     le.fit(["placeholder"])
 
 # ---------------------------------------------------------------------------
-# Feature set — original 8 + 6 new pitcher/situational features
-# New features are optional: if missing from CSV they default to 0
-# so old training data still works during transition
+# Feature set
+#
+# PHASE 1 (Opening Day through ~April 20):
+#   Rolling stats removed — all zeros until 2026 games accumulate.
+#   Model uses pitcher quality + situational features only.
+#
+# PHASE 2 (after April 20 + retrain):
+#   Uncomment ROLLING_FEATURES and add back to features list.
+#   Run build_dataset.py + train_model.py again.
 # ---------------------------------------------------------------------------
 
-CORE_FEATURES = [
-    "era_diff",
-    "whip_diff",
-    "home_last10_runs_scored",
-    "away_last10_runs_scored",
-    "home_last10_runs_allowed",
-    "away_last10_runs_allowed",
-    "home_last10_run_diff",
-    "away_last10_run_diff",
+PITCHER_FEATURES = [
+    "era_diff",               # home SP ERA minus away SP ERA
+    "whip_diff",              # home SP WHIP minus away SP WHIP
+    "home_sp_rest_days",      # days since home SP last start
+    "away_sp_rest_days",      # days since away SP last start
+    "home_bullpen_ip_4d",     # home bullpen IP last 4 days (fatigue)
+    "away_bullpen_ip_4d",     # away bullpen IP last 4 days (fatigue)
 ]
 
-NEW_FEATURES = [
-    "home_sp_rest_days",    # days since home SP's last start (3=short, 5+=fresh)
-    "away_sp_rest_days",    # days since away SP's last start
-    "home_bullpen_ip_4d",   # home bullpen innings over last 4 days (fatigue)
-    "away_bullpen_ip_4d",   # away bullpen innings over last 4 days (fatigue)
-    "home_win_pct_home",    # home team win% at home this season
-    "away_win_pct_away",    # away team win% on road this season
+SITUATIONAL_FEATURES = [
+    "home_win_pct_home",      # home team win% at home (historical)
+    "away_win_pct_away",      # away team win% on road (historical)
 ]
 
-features = CORE_FEATURES + NEW_FEATURES
+# ROLLING_FEATURES — re-enable after April 20 once 2026 data accumulates
+# ROLLING_FEATURES = [
+#     "home_last10_runs_scored",
+#     "away_last10_runs_scored",
+#     "home_last10_runs_allowed",
+#     "away_last10_runs_allowed",
+#     "home_last10_run_diff",
+#     "away_last10_run_diff",
+# ]
 
-# Fill new features with sensible defaults if not present in training data
-# (allows retraining with old CSVs while transition is in progress)
-for col in NEW_FEATURES:
+features = PITCHER_FEATURES + SITUATIONAL_FEATURES
+# features = PITCHER_FEATURES + SITUATIONAL_FEATURES + ROLLING_FEATURES  # phase 2
+
+print(f"\nPhase 1 feature set ({len(features)} features):")
+for f in features:
+    print(f"  - {f}")
+print()
+
+# ---------------------------------------------------------------------------
+# Fill missing features with sensible defaults
+# (covers older training CSVs that don't have new columns yet)
+# ---------------------------------------------------------------------------
+
+defaults = {
+    "home_sp_rest_days":  5.0,
+    "away_sp_rest_days":  5.0,
+    "home_bullpen_ip_4d": 4.0,
+    "away_bullpen_ip_4d": 4.0,
+    "home_win_pct_home":  0.5,
+    "away_win_pct_away":  0.5,
+}
+
+for col, default in defaults.items():
     if col not in df.columns:
-        print(f"  ⚠️  '{col}' not in dataset — filling with default value")
-        if "rest_days" in col:
-            df[col] = 5.0     # assume normal rest
-        elif "bullpen_ip" in col:
-            df[col] = 4.0     # assume average bullpen usage
-        elif "win_pct" in col:
-            df[col] = 0.5     # assume 50/50
-        else:
-            df[col] = 0.0
+        print(f"  ⚠️  '{col}' not in dataset — filling with {default}")
+        df[col] = default
 
-missing = [c for c in CORE_FEATURES if c not in df.columns]
+missing = [c for c in features if c not in df.columns]
 if missing:
-    raise ValueError(f"Missing core feature columns in training_data.csv: {missing}")
+    raise ValueError(f"Missing feature columns in training_data.csv: {missing}")
 
-df = df.dropna(subset=CORE_FEATURES)
+df = df.dropna(subset=["era_diff", "whip_diff"])
 
 if "game_date" not in df.columns:
     raise ValueError("training_data.csv must include 'game_date'.")
@@ -86,8 +107,7 @@ test  = df.iloc[split_index:]
 X_train = train[features]
 X_test  = test[features]
 
-print(f"\nTraining on {len(train)} games, testing on {len(test)} games")
-print(f"Features ({len(features)}): {features}\n")
+print(f"Training on {len(train)} games, testing on {len(test)} games\n")
 
 # ---------------------------------------------------------------------------
 # Run differential model
@@ -136,7 +156,7 @@ preds = win_model.predict(X_test)
 print(f"Win Model Accuracy: {round(accuracy_score(test['home_win'].astype(int), preds), 4)}")
 
 # ---------------------------------------------------------------------------
-# Feature importance summary
+# Feature importance
 # ---------------------------------------------------------------------------
 print("\nFeature importances (win model):")
 importances = dict(zip(features, win_model.feature_importances_))
@@ -145,7 +165,7 @@ for feat, imp in sorted(importances.items(), key=lambda x: -x[1]):
     print(f"  {feat:<30} {imp:.4f}  {bar}")
 
 # ---------------------------------------------------------------------------
-# Save models
+# Save
 # ---------------------------------------------------------------------------
 ml_dir = os.path.join(PROJECT_ROOT, "ml")
 os.makedirs(ml_dir, exist_ok=True)
@@ -161,10 +181,10 @@ joblib.dump(total_model, total_path)
 joblib.dump(win_model,   win_path)
 
 meta = {
-    "features":        features,
-    "core_features":   CORE_FEATURES,
-    "new_features":    NEW_FEATURES,
-    "team_classes_":   le.classes_.tolist(),
+    "features":     features,
+    "phase":        1,
+    "team_classes_": le.classes_.tolist(),
+    "note":         "Phase 1 — rolling stats excluded until 2026 data accumulates (~April 20)",
 }
 joblib.dump(meta, meta_path)
 joblib.dump(win_model, alias_path)
@@ -175,4 +195,5 @@ print(f"  {total_path}")
 print(f"  {win_path}")
 print(f"  {meta_path}")
 print(f"  {alias_path} (engine alias)")
-print(f"\nFeature count: {len(features)} (was 8, now {len(features)})")
+print(f"\nPhase 1 — {len(features)} features active")
+print("Reminder: re-enable ROLLING_FEATURES and retrain after April 20")
