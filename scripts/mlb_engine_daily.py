@@ -24,18 +24,18 @@ PROB_TABLE  = os.getenv("MLB_PROBABLES_TABLE", "game_probables")
 PRED_TABLE  = os.getenv("MLB_PREDICTIONS_TABLE", "predictions")
 
 SEASON             = int(os.getenv("MLB_SEASON", "2026"))
-GAME_TYPES         = os.getenv("MLB_GAME_TYPES", "S,R")
+GAME_TYPES         = os.getenv("MLB_GAME_TYPES", "R")
 WINDOW_DAYS        = int(os.getenv("WINDOW_DAYS", "30"))
 DEFAULT_TOTAL_LINE = float(os.getenv("DEFAULT_TOTAL_LINE", "8.5"))
 
 SLEEP        = float(os.getenv("REQUEST_SLEEP_SECONDS", "0.05"))
 HTTP_TIMEOUT = 25
 
-ML_DIR             = os.path.join(PROJECT_ROOT, "ml")
-WIN_MODEL_PATH     = os.getenv("MLB_WIN_MODEL_PATH",   os.path.join(ML_DIR, "win_model.pkl"))
-RUN_MODEL_PATH     = os.getenv("MLB_RUN_MODEL_PATH",   os.path.join(ML_DIR, "run_model.pkl"))
-TOTAL_MODEL_PATH   = os.getenv("MLB_TOTAL_MODEL_PATH", os.path.join(ML_DIR, "total_model.pkl"))
-FALLBACK_MODEL_PATH = os.getenv("MLB_MODEL_PATH",      os.path.join(ML_DIR, "mlb_model.pkl"))
+ML_DIR              = os.path.join(PROJECT_ROOT, "ml")
+WIN_MODEL_PATH      = os.getenv("MLB_WIN_MODEL_PATH",   os.path.join(ML_DIR, "win_model.pkl"))
+RUN_MODEL_PATH      = os.getenv("MLB_RUN_MODEL_PATH",   os.path.join(ML_DIR, "run_model.pkl"))
+TOTAL_MODEL_PATH    = os.getenv("MLB_TOTAL_MODEL_PATH", os.path.join(ML_DIR, "total_model.pkl"))
+FALLBACK_MODEL_PATH = os.getenv("MLB_MODEL_PATH",       os.path.join(ML_DIR, "mlb_model.pkl"))
 
 MLB_BASE = "https://statsapi.mlb.com/api/v1"
 MLB_FEED = "https://statsapi.mlb.com/api/v1.1/game/{gamePk}/feed/live"
@@ -62,7 +62,6 @@ def utc_dt(iso_z: str) -> datetime:
 
 
 def _safe_float(val) -> Optional[float]:
-    """Return a JSON-safe float or None. Handles nan, inf, None, numpy scalars."""
     try:
         if val is None:
             return None
@@ -96,47 +95,47 @@ def ensure_tables(cur):
     cur.execute(f"CREATE TABLE IF NOT EXISTS {PRED_TABLE}  (game_pk BIGINT PRIMARY KEY);")
 
     for col, typedef in [
-        ("official_date",   "DATE"),
-        ("game_date_utc",   "TIMESTAMPTZ"),
-        ("season",          "INT"),
-        ("game_type",       "TEXT"),
-        ("status",          "TEXT"),
-        ("home_team",       "TEXT"),
-        ("away_team",       "TEXT"),
-        ("home_team_id",    "INT"),
-        ("away_team_id",    "INT"),
+        ("official_date", "DATE"),
+        ("game_date_utc", "TIMESTAMPTZ"),
+        ("season",        "INT"),
+        ("game_type",     "TEXT"),
+        ("status",        "TEXT"),
+        ("home_team",     "TEXT"),
+        ("away_team",     "TEXT"),
+        ("home_team_id",  "INT"),
+        ("away_team_id",  "INT"),
     ]:
         cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS {col} {typedef};")
     cur.execute(f"ALTER TABLE {GAMES_TABLE} ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();")
     cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{GAMES_TABLE}_official_date ON {GAMES_TABLE}(official_date);")
 
     for col, typedef in [
-        ("official_date",  "DATE"),
-        ("home_sp_id",     "INT"),
-        ("away_sp_id",     "INT"),
-        ("home_sp_name",   "TEXT"),
-        ("away_sp_name",   "TEXT"),
-        ("status",         "TEXT"),
+        ("official_date", "DATE"),
+        ("home_sp_id",    "INT"),
+        ("away_sp_id",    "INT"),
+        ("home_sp_name",  "TEXT"),
+        ("away_sp_name",  "TEXT"),
+        ("status",        "TEXT"),
     ]:
         cur.execute(f"ALTER TABLE {PROB_TABLE} ADD COLUMN IF NOT EXISTS {col} {typedef};")
     cur.execute(f"ALTER TABLE {PROB_TABLE} ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();")
     cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{PROB_TABLE}_official_date ON {PROB_TABLE}(official_date);")
 
     for col, typedef in [
-        ("official_date",    "DATE"),
-        ("home_team",        "TEXT"),
-        ("away_team",        "TEXT"),
-        ("prediction",       "INT"),
-        ("win_probability",  "DOUBLE PRECISION"),
-        ("home_win_prob",    "DOUBLE PRECISION"),
-        ("away_win_prob",    "DOUBLE PRECISION"),
-        ("home_ml_implied",  "INT"),
-        ("away_ml_implied",  "INT"),
-        ("run_diff_pred",    "DOUBLE PRECISION"),
-        ("total_runs_pred",  "DOUBLE PRECISION"),
-        ("ml_pick",          "TEXT"),
-        ("runline_pick",     "TEXT"),
-        ("ou_pick",          "TEXT"),
+        ("official_date",   "DATE"),
+        ("home_team",       "TEXT"),
+        ("away_team",       "TEXT"),
+        ("prediction",      "INT"),
+        ("win_probability", "DOUBLE PRECISION"),
+        ("home_win_prob",   "DOUBLE PRECISION"),
+        ("away_win_prob",   "DOUBLE PRECISION"),
+        ("home_ml_implied", "INT"),
+        ("away_ml_implied", "INT"),
+        ("run_diff_pred",   "DOUBLE PRECISION"),
+        ("total_runs_pred", "DOUBLE PRECISION"),
+        ("ml_pick",         "TEXT"),
+        ("runline_pick",    "TEXT"),
+        ("ou_pick",         "TEXT"),
     ]:
         cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS {col} {typedef};")
     cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();")
@@ -218,10 +217,10 @@ def upsert_schedule(cur, start: date, end: date, tmap: Dict[int, str]) -> int:
 
 
 def parse_probables(payload: Dict[str, Any]) -> Tuple[Optional[int], Optional[str], Optional[int], Optional[str], Optional[str]]:
-    gd     = payload.get("gameData") or {}
-    prob   = gd.get("probablePitchers") or {}
+    gd      = payload.get("gameData") or {}
+    prob    = gd.get("probablePitchers") or {}
     players = gd.get("players") or {}
-    status = (gd.get("status") or {}).get("detailedState") or None
+    status  = (gd.get("status") or {}).get("detailedState") or None
 
     def one(side: str) -> Tuple[Optional[int], Optional[str]]:
         p   = prob.get(side) or {}
@@ -305,10 +304,6 @@ def load_models() -> Tuple[Any, Any, Any]:
 
 
 def align_to_model(df: pd.DataFrame, model: Any) -> pd.DataFrame:
-    """
-    Select and order only the columns the model was trained on.
-    Missing columns are filled with 0. Extra columns are dropped.
-    """
     feat_cols = getattr(model, "feature_names_in_", None)
     drop = {
         "game_pk", "official_date", "home_team", "away_team",
@@ -325,18 +320,14 @@ def align_to_model(df: pd.DataFrame, model: Any) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Feature builder  ← THIS IS THE KEY FIX
+# Feature builder
 # ---------------------------------------------------------------------------
 
 def build_features_for_date(cur, target: date) -> pd.DataFrame:
     """
-    Build the 8 model features for every game on `target` date.
-
-    Features (matching train_model.py):
-        era_diff, whip_diff,
-        home_last10_runs_scored, away_last10_runs_scored,
-        home_last10_runs_allowed, away_last10_runs_allowed,
-        home_last10_run_diff, away_last10_run_diff
+    Build model features for every game on target date.
+    Pitcher ERA/WHIP uses most recent available season (not hardcoded to 2026)
+    so 2025 stats are used until 2026 data populates.
     """
     cur.execute(
         f"""
@@ -351,14 +342,12 @@ def build_features_for_date(cur, target: date) -> pd.DataFrame:
             p.away_sp_id,
             p.home_sp_name,
             p.away_sp_name,
-            -- rolling team stats (populated by build_dataset / rolling update)
             g.home_last10_runs_scored,
             g.away_last10_runs_scored,
             g.home_last10_runs_allowed,
             g.away_last10_runs_allowed,
             g.home_last10_run_diff,
             g.away_last10_run_diff,
-            -- pitcher ERA/WHIP joined from pitchers table
             hp.era   AS home_era,
             hp.whip  AS home_whip,
             ap.era   AS away_era,
@@ -368,14 +357,20 @@ def build_features_for_date(cur, target: date) -> pd.DataFrame:
             ON p.game_pk = g.game_pk
         LEFT JOIN pitchers hp
             ON LOWER(TRIM(hp.pitcher_name)) = LOWER(TRIM(p.home_sp_name))
-            AND hp.season = %s
+            AND hp.season = (
+                SELECT MAX(season) FROM pitchers
+                WHERE LOWER(TRIM(pitcher_name)) = LOWER(TRIM(p.home_sp_name))
+            )
         LEFT JOIN pitchers ap
             ON LOWER(TRIM(ap.pitcher_name)) = LOWER(TRIM(p.away_sp_name))
-            AND ap.season = %s
+            AND ap.season = (
+                SELECT MAX(season) FROM pitchers
+                WHERE LOWER(TRIM(pitcher_name)) = LOWER(TRIM(p.away_sp_name))
+            )
         WHERE g.official_date = %s
         ORDER BY g.game_pk
         """,
-        (SEASON, SEASON, target),
+        (target,),
     )
     rows = cur.fetchall()
     if not rows:
@@ -391,11 +386,11 @@ def build_features_for_date(cur, target: date) -> pd.DataFrame:
         "home_era", "home_whip", "away_era", "away_whip",
     ])
 
-    # League-average ERA/WHIP fallback for unknown pitchers
-    cur.execute(
-        "SELECT AVG(era), AVG(whip) FROM pitchers WHERE season = %s",
-        (SEASON,),
-    )
+    # League-average fallback using most recent season available
+    cur.execute("""
+        SELECT AVG(era), AVG(whip) FROM pitchers
+        WHERE season = (SELECT MAX(season) FROM pitchers)
+    """)
     row = cur.fetchone()
     league_era  = float(row[0]) if row and row[0] is not None else 4.20
     league_whip = float(row[1]) if row and row[1] is not None else 1.30
@@ -408,7 +403,6 @@ def build_features_for_date(cur, target: date) -> pd.DataFrame:
     df["era_diff"]  = df["home_era"]  - df["away_era"]
     df["whip_diff"] = df["home_whip"] - df["away_whip"]
 
-    # Rolling stats: fill with 0.0 when not yet available (spring training / early season)
     rolling_cols = [
         "home_last10_runs_scored", "away_last10_runs_scored",
         "home_last10_runs_allowed", "away_last10_runs_allowed",
@@ -427,16 +421,11 @@ def build_features_for_date(cur, target: date) -> pd.DataFrame:
 # Save predictions
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# REPLACE the existing save_predictions function in mlb_engine_daily.py
-# with this version. Adds market odds columns to the upsert.
-# ---------------------------------------------------------------------------
-
-def save_predictions(cur, out: "pd.DataFrame") -> int:
+def save_predictions(cur, out: pd.DataFrame) -> int:
     if out.empty:
         return 0
 
-    # Ensure new market odds columns exist in predictions table
+    # Ensure market odds columns exist
     new_cols = [
         ("market_home_prob",  "DOUBLE PRECISION"),
         ("market_away_prob",  "DOUBLE PRECISION"),
@@ -450,13 +439,11 @@ def save_predictions(cur, out: "pd.DataFrame") -> int:
     for col, dtype in new_cols:
         cur.execute(f"ALTER TABLE {PRED_TABLE} ADD COLUMN IF NOT EXISTS {col} {dtype};")
 
-    # Helper to safely get optional column value
     def safe_col(row, col):
         try:
             val = row.get(col)
             if val is None:
                 return None
-            import math
             f = float(val)
             return None if (math.isnan(f) or math.isinf(f)) else f
         except Exception:
@@ -467,7 +454,6 @@ def save_predictions(cur, out: "pd.DataFrame") -> int:
             val = row.get(col)
             if val is None:
                 return None
-            import math
             f = float(val)
             return None if (math.isnan(f) or math.isinf(f)) else int(f)
         except Exception:
@@ -488,22 +474,20 @@ def save_predictions(cur, out: "pd.DataFrame") -> int:
             safe_int_col(row, "away_ml_implied"),
             safe_col(row, "run_diff_pred"),
             safe_col(row, "total_runs_pred"),
-            str(row["ml_pick"]) if row.get("ml_pick") else None,
+            str(row["ml_pick"])      if row.get("ml_pick")      else None,
             str(row["runline_pick"]) if row.get("runline_pick") else None,
-            str(row["ou_pick"]) if row.get("ou_pick") else None,
-            # Market odds columns (None if no odds API key or no match)
-            safe_col(row, "market_home_prob"),
-            safe_col(row, "market_away_prob"),
-            safe_col(row, "market_total_line"),
+            str(row["ou_pick"])      if row.get("ou_pick")      else None,
+            safe_col(row,     "market_home_prob"),
+            safe_col(row,     "market_away_prob"),
+            safe_col(row,     "market_total_line"),
             safe_int_col(row, "market_home_ml"),
             safe_int_col(row, "market_away_ml"),
             safe_int_col(row, "best_home_ml"),
             safe_int_col(row, "best_away_ml"),
-            safe_col(row, "model_edge"),
-            __import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+            safe_col(row,     "model_edge"),
+            datetime.now(timezone.utc),
         ))
 
-    from psycopg2.extras import execute_values
     sql = f"""
     INSERT INTO {PRED_TABLE} (
       game_pk, official_date, away_team, home_team,
@@ -515,8 +499,7 @@ def save_predictions(cur, out: "pd.DataFrame") -> int:
       market_home_prob, market_away_prob, market_total_line,
       market_home_ml, market_away_ml,
       best_home_ml, best_away_ml,
-      model_edge,
-      updated_at
+      model_edge, updated_at
     )
     VALUES %s
     ON CONFLICT (game_pk) DO UPDATE SET
@@ -600,42 +583,41 @@ def main():
             else:
                 home_prob_raw = win_model.predict(X_win)
 
-            # Sanitize all model outputs — nan/inf → safe fallback
-            home_prob  = [_safe_float(x) or 0.5  for x in home_prob_raw]
-            away_prob  = [round(1.0 - hp, 6)      for hp in home_prob]
-            prediction = [1 if hp >= 0.5 else 0   for hp in home_prob]
-            run_diff   = [_safe_float(x) or 0.0   for x in run_model.predict(X_run)]
-            total_runs = [_safe_float(x) or 0.0   for x in total_model.predict(X_tot)]
+            home_prob  = [_safe_float(x) or 0.5 for x in home_prob_raw]
+            away_prob  = [round(1.0 - hp, 6)     for hp in home_prob]
+            prediction = [1 if hp >= 0.5 else 0  for hp in home_prob]
+            run_diff   = [_safe_float(x) or 0.0  for x in run_model.predict(X_run)]
+            total_runs = [_safe_float(x) or 0.0  for x in total_model.predict(X_tot)]
 
-            ml_pick       = ["HOME" if hp >= 0.5  else "AWAY"      for hp in home_prob]
-            runline_pick  = ["HOME -1.5" if rd >= 1.5 else "AWAY +1.5" for rd in run_diff]
-            ou_pick       = ["OVER" if tr >= DEFAULT_TOTAL_LINE else "UNDER" for tr in total_runs]
+            ml_pick      = ["HOME" if hp >= 0.5      else "AWAY"      for hp in home_prob]
+            runline_pick = ["HOME -1.5" if rd >= 1.5 else "AWAY +1.5" for rd in run_diff]
+            ou_pick      = ["OVER" if tr >= DEFAULT_TOTAL_LINE else "UNDER" for tr in total_runs]
 
             out = pd.DataFrame({
-                "game_pk":        base["game_pk"].astype(int),
-                "official_date":  pd.to_datetime(base["official_date"]).dt.date,
-                "away_team":      base["away_team"].astype(str),
-                "home_team":      base["home_team"].astype(str),
-                "prediction":     prediction,
+                "game_pk":         base["game_pk"].astype(int),
+                "official_date":   pd.to_datetime(base["official_date"]).dt.date,
+                "away_team":       base["away_team"].astype(str),
+                "home_team":       base["home_team"].astype(str),
+                "prediction":      prediction,
                 "win_probability": home_prob,
-                "home_win_prob":  home_prob,
-                "away_win_prob":  away_prob,
+                "home_win_prob":   home_prob,
+                "away_win_prob":   away_prob,
                 "home_ml_implied": [implied_moneyline(x) for x in home_prob],
                 "away_ml_implied": [implied_moneyline(x) for x in away_prob],
-                "run_diff_pred":  run_diff,
+                "run_diff_pred":   run_diff,
                 "total_runs_pred": total_runs,
-                "ml_pick":        ml_pick,
-                "runline_pick":   runline_pick,
-                "ou_pick":        ou_pick,
+                "ml_pick":         ml_pick,
+                "runline_pick":    runline_pick,
+                "ou_pick":         ou_pick,
             })
 
             n_saved = save_predictions(cur, out)
             c.commit()
 
-            print(f"Schedule upserted:   {n_sched}")
-            print(f"Probables upserted:  {n_prob}")
-            print(f"Slate date:          {slate}")
-            print(f"Predictions saved:   {n_saved}")
+            print(f"Schedule upserted:  {n_sched}")
+            print(f"Probables upserted: {n_prob}")
+            print(f"Slate date:         {slate}")
+            print(f"Predictions saved:  {n_saved}")
 
     except Exception:
         c.rollback()
