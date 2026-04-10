@@ -8,10 +8,25 @@
   <p>Moneyline • Run Line • Totals • Probable Starters</p>
 </header>
 
-<div style="margin-bottom:16px;">
-  <label for="game_date"><strong>Date</strong></label>
-  <input id="game_date" type="date" value="{{ game_date }}">
-  <button id="loadBtn" type="button">Load Predictions</button>
+<div style="margin-bottom:16px; display:flex; gap:12px; flex-wrap:wrap; align-items:end;">
+  <div>
+    <label for="game_date"><strong>Date</strong></label><br>
+    <input id="game_date" type="date" value="{{ game_date }}">
+  </div>
+
+  <div>
+    <label for="teamSearch"><strong>Search Team</strong></label><br>
+    <input
+      id="teamSearch"
+      type="text"
+      placeholder="Search team..."
+      style="padding:6px 10px; min-width:220px;"
+    >
+  </div>
+
+  <div>
+    <button id="loadBtn" type="button">Load Predictions</button>
+  </div>
 </div>
 
 <div id="status" class="stats">Click "Load Predictions".</div>
@@ -116,6 +131,7 @@ const statusEl = document.getElementById("status");
 const cardsEl  = document.getElementById("cards");
 const dateEl   = document.getElementById("game_date");
 const loadBtn  = document.getElementById("loadBtn");
+const searchEl = document.getElementById("teamSearch");
 
 function pct(x) {
   if (x === null || x === undefined || isNaN(Number(x))) return "—";
@@ -143,69 +159,88 @@ function edgeBadge(edge) {
 
 function pickClass(pick) {
   if (!pick) return "";
-  const p = pick.toUpperCase();
-  if (p === "HOME" || p.startsWith("HOME")) return "home";
-  if (p === "AWAY" || p.startsWith("AWAY")) return "away";
+  const p = String(pick).toUpperCase();
   if (p === "OVER") return "over";
   if (p === "UNDER") return "under";
+  if (p === "PASS") return "";
+
+  if (p.includes("-1.5") || p.includes("+1.5")) {
+    return "";
+  }
+
   return "";
 }
 
 function cardHTML(p) {
-  const winPct   = pct(p.home_win_prob);
+  const winPct = pct(p.home_win_prob);
+  const awayWinPct = (winPct === "—") ? "—" : Math.round((100 - Number(winPct)) * 10) / 10;
   const barWidth = typeof winPct === "number" ? Math.max(0, Math.min(100, winPct)) : 0;
+
   const hasMkt =
-  p.market_home_prob != null ||
-  p.market_away_prob != null ||
-  p.market_total_line != null ||
-  p.market_home_ml != null ||
-  p.market_away_ml != null ||
-  p.best_home_ml != null ||
-  p.best_away_ml != null;
-  const mktPct   = hasMkt ? pct(p.market_home_prob) : null;
+    p.market_home_prob != null ||
+    p.market_away_prob != null ||
+    p.market_total_line != null ||
+    p.market_home_ml != null ||
+    p.market_away_ml != null ||
+    p.best_home_ml != null ||
+    p.best_away_ml != null;
+
+  const mktPct = hasMkt ? pct(p.market_home_prob) : null;
 
   return `
-    <div class="game-card">
+    <div class="game-card ${p.play_rank ? 'top-play-card' : ''}">
 
-      <!-- Teams + logos -->
+      ${p.play_rank ? `
+        <div class="top-play-badge">
+          ⭐ Top Play #${p.play_rank}
+          ${p.play_type ? `<span class="top-play-type">${p.play_type}</span>` : ""}
+        </div>
+        ${p.play_detail ? `<div class="top-play-detail">${p.play_detail}</div>` : ""}
+      ` : ""}
+
       <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap;">
         ${p.away_logo ? `<img src="${p.away_logo}" alt="${p.away_team}" style="width:36px;height:36px;">` : ""}
         <div class="teams">${p.away_team || "Away"} @ ${p.home_team || "Home"}</div>
         ${p.home_logo ? `<img src="${p.home_logo}" alt="${p.home_team}" style="width:36px;height:36px;">` : ""}
       </div>
 
-      <!-- Starters -->
       <div class="stats">
-        Away SP: ${p.away_starting_pitcher || "TBD"}<br>
-        Home SP: ${p.home_starting_pitcher || "TBD"}
+        Away SP: ${p.away_starting_pitcher || p.away_sp_name || "TBD"}<br>
+        Home SP: ${p.home_starting_pitcher || p.home_sp_name || "TBD"}
       </div>
 
       ${p.ok ? `
-
-        <!-- Pick badges -->
         <div class="picks-row">
           <span class="pick-badge ${pickClass(p.ml_pick)}">ML: ${p.ml_pick || "—"}</span>
           <span class="pick-badge ${pickClass(p.runline_pick)}">RL: ${p.runline_pick || "—"}</span>
           <span class="pick-badge ${pickClass(p.ou_pick)}">O/U: ${p.ou_pick || "—"}</span>
         </div>
 
-        <!-- Model vs Market odds grid -->
         <div class="section-label">Model</div>
         <div class="odds-grid">
           <div class="odds-box">
             <div class="label">Home Win %</div>
             <div class="value">${winPct === "—" ? "—" : winPct + "%"}${edgeBadge(p.model_edge)}</div>
-            <div class="sub">Fair ML: ${fmtML(p.home_moneyline_fair)}</div>
+            <div class="sub">Fair ML: ${fmtML(p.home_moneyline_fair || p.home_ml_implied)}</div>
+            <div class="sub">CI: ${pct(p.home_win_prob_lo)}% to ${pct(p.home_win_prob_hi)}%</div>
           </div>
+
           <div class="odds-box">
             <div class="label">Away Win %</div>
-            <div class="value">${winPct === "—" ? "—" : Math.round((100 - Number(winPct)) * 10) / 10 + "%"}</div>
-            <div class="sub">Fair ML: ${fmtML(p.away_moneyline_fair)}</div>
+            <div class="value">${awayWinPct === "—" ? "—" : awayWinPct + "%"}</div>
+            <div class="sub">Fair ML: ${fmtML(p.away_moneyline_fair || p.away_ml_implied)}</div>
           </div>
+
           <div class="odds-box">
             <div class="label">Predicted Total</div>
-            <div class="value">${fmtNum(p.pred_total_runs)}</div>
-            <div class="sub">Run diff: ${fmtNum(p.pred_run_diff)}</div>
+            <div class="value">${fmtNum(p.pred_total_runs || p.total_runs_pred)}</div>
+            <div class="sub">CI: ${fmtNum(p.total_runs_lo, 2)} to ${fmtNum(p.total_runs_hi, 2)}</div>
+          </div>
+
+          <div class="odds-box">
+            <div class="label">Run Diff</div>
+            <div class="value">${fmtNum(p.pred_run_diff || p.run_diff_pred)}</div>
+            <div class="sub">CI: ${fmtNum(p.run_diff_lo, 2)} to ${fmtNum(p.run_diff_hi, 2)}</div>
           </div>
         </div>
 
@@ -217,11 +252,13 @@ function cardHTML(p) {
               <div class="value">${mktPct !== null ? mktPct + "%" : "—"}</div>
               <div class="sub">Consensus ML: ${fmtML(p.market_home_ml)}</div>
             </div>
+
             <div class="odds-box">
               <div class="label">Away Implied %</div>
               <div class="value">${mktPct !== null ? Math.round((100 - Number(mktPct)) * 10) / 10 + "%" : "—"}</div>
               <div class="sub">Consensus ML: ${fmtML(p.market_away_ml)}</div>
             </div>
+
             <div class="odds-box">
               <div class="label">O/U Line</div>
               <div class="value">${p.market_total_line !== null ? p.market_total_line : "—"}</div>
@@ -247,24 +284,48 @@ function cardHTML(p) {
   `;
 }
 
+function applySearchFilter() {
+  const query = (searchEl.value || "").trim().toLowerCase();
+  const cards = document.querySelectorAll(".game-card");
+
+  cards.forEach(card => {
+    const text = card.innerText.toLowerCase();
+    card.style.display = text.includes(query) ? "" : "none";
+  });
+}
+
 async function loadPredictions() {
   try {
     const d = dateEl.value;
     statusEl.textContent = "Loading...";
-    cardsEl.innerHTML    = "";
+    cardsEl.innerHTML = "";
 
-    const res  = await fetch(`/api/predict/today?game_date=${encodeURIComponent(d)}`);
-    if (!res.ok) { statusEl.textContent = `Request failed: ${res.status}`; return; }
+    const res = await fetch(`/api/predict/today?game_date=${encodeURIComponent(d)}`);
+    if (!res.ok) {
+      statusEl.textContent = `Request failed: ${res.status}`;
+      return;
+    }
 
     const data = await res.json();
-    if (!data.ok) { statusEl.textContent = "API returned an error."; return; }
+    if (!data.ok) {
+      statusEl.textContent = "API returned an error.";
+      return;
+    }
     if (!data.predictions || data.predictions.length === 0) {
       statusEl.textContent = `No predictions found for ${d}.`;
       return;
     }
 
+    data.predictions.sort((a, b) => {
+      if (a.play_rank && b.play_rank) return a.play_rank - b.play_rank;
+      if (a.play_rank) return -1;
+      if (b.play_rank) return 1;
+      return 0;
+    });
+
     statusEl.textContent = `Loaded ${data.count} games for ${d}.`;
-    cardsEl.innerHTML    = data.predictions.map(cardHTML).join("");
+    cardsEl.innerHTML = data.predictions.map(cardHTML).join("");
+    applySearchFilter();
   } catch (err) {
     console.error(err);
     statusEl.textContent = "JavaScript error loading predictions.";
@@ -272,6 +333,7 @@ async function loadPredictions() {
 }
 
 loadBtn.addEventListener("click", loadPredictions);
+searchEl.addEventListener("input", applySearchFilter);
 document.addEventListener("DOMContentLoaded", loadPredictions);
 </script>
 {% endblock %}

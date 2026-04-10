@@ -23,7 +23,6 @@ def main():
     run_step("Load Pitcher Game Logs", "load_pitcher_game_log.py")
     run_step("Load Lineups",           "load_lineups.py")
     run_step("Load Odds",              "load_odds.py")
-    run_step("Build Features",         "build_team_features.py")
     run_step("Run MLB Engine",         "mlb_engine_daily.py")
     run_step("Daily Picks Tracker",    "daily_picks_tracker.py")
     print("\n✅ Full update complete.")

@@ -40,7 +40,7 @@ HTTP_TIMEOUT = 20
 SLEEP        = float(os.getenv("REQUEST_SLEEP_SECONDS", "0.1"))
 
 MLB_BASE     = "https://statsapi.mlb.com/api/v1"
-SEASONS      = [2024, 2025, 2026]
+SEASONS      = [2026]
 
 
 # ---------------------------------------------------------------------------

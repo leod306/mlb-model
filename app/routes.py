@@ -12,7 +12,7 @@ from sqlalchemy import text
 
 from app.db import engine
 
-router    = APIRouter()
+router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 
 
@@ -94,6 +94,7 @@ def api_games(game_date: str = Query(..., description="YYYY-MM-DD")):
         SELECT
             g.game_pk,
             g.official_date,
+            g.game_date_utc,
             g.home_team,
             g.away_team,
             COALESCE(gp.home_sp_name, g.home_starting_pitcher) AS home_starting_pitcher,
@@ -105,7 +106,7 @@ def api_games(game_date: str = Query(..., description="YYYY-MM-DD")):
         FROM games g
         LEFT JOIN game_probables gp ON gp.game_pk = g.game_pk
         WHERE CAST(g.official_date AS DATE) = :d
-        ORDER BY g.home_team, g.away_team
+        ORDER BY g.game_date_utc ASC NULLS LAST, g.game_pk
         """
     )
 
@@ -116,6 +117,7 @@ def api_games(game_date: str = Query(..., description="YYYY-MM-DD")):
         games.append({
             "game_pk":               safe_int(r.get("game_pk")),
             "game_date":             safe_str(r.get("official_date")),
+            "game_date_utc":         safe_str(r.get("game_date_utc")),
             "home_team":             safe_str(r.get("home_team")),
             "away_team":             safe_str(r.get("away_team")),
             "home_logo":             team_logo_by_id(r.get("home_team_id")),
@@ -142,23 +144,49 @@ def api_predict_today(game_date: str = Query(..., description="YYYY-MM-DD")):
         SELECT
             g.game_pk,
             g.official_date,
+            g.game_date_utc,
             g.home_team,
             g.away_team,
+
             COALESCE(gp.home_sp_name, g.home_starting_pitcher) AS home_starting_pitcher,
             COALESCE(gp.away_sp_name, g.away_starting_pitcher) AS away_starting_pitcher,
             COALESCE(gp.home_sp_id, NULL) AS home_sp_id,
             COALESCE(gp.away_sp_id, NULL) AS away_sp_id,
+
             g.home_team_id,
             g.away_team_id,
+
+            -- MODEL
             p.home_win_prob,
             p.away_win_prob,
+            p.home_win_prob_lo,
+            p.home_win_prob_hi,
+            p.home_win_prob_std,
+
             p.home_ml_implied,
             p.away_ml_implied,
+
             p.run_diff_pred,
+            p.run_diff_lo,
+            p.run_diff_hi,
+            p.run_diff_std,
+
             p.total_runs_pred,
+            p.total_runs_lo,
+            p.total_runs_hi,
+            p.total_runs_std,
+
             p.ml_pick,
             p.runline_pick,
             p.ou_pick,
+
+            -- TOP PLAYS
+            p.play_rank,
+            p.play_type,
+            p.play_score,
+            p.play_detail,
+
+            -- MARKET
             p.market_home_prob,
             p.market_away_prob,
             p.market_total_line,
@@ -167,11 +195,12 @@ def api_predict_today(game_date: str = Query(..., description="YYYY-MM-DD")):
             p.best_home_ml,
             p.best_away_ml,
             p.model_edge
+
         FROM games g
-        LEFT JOIN predictions p       ON p.game_pk  = g.game_pk
-        LEFT JOIN game_probables gp   ON gp.game_pk = g.game_pk
+        LEFT JOIN predictions p     ON p.game_pk = g.game_pk
+        LEFT JOIN game_probables gp ON gp.game_pk = g.game_pk
         WHERE CAST(g.official_date AS DATE) = :d
-        ORDER BY g.home_team, g.away_team
+        ORDER BY g.game_date_utc ASC NULLS LAST, g.game_pk
         """
     )
 
@@ -182,28 +211,55 @@ def api_predict_today(game_date: str = Query(..., description="YYYY-MM-DD")):
         has_prediction = (
             pd.notna(row.get("ml_pick")) or pd.notna(row.get("home_win_prob"))
         )
+
         results.append({
             "id":                    safe_int(row.get("game_pk")),
             "game_pk":               safe_int(row.get("game_pk")),
             "game_date":             safe_str(row.get("official_date")),
+            "game_date_utc":         safe_str(row.get("game_date_utc")),
+
             "home_team":             safe_str(row.get("home_team")),
             "away_team":             safe_str(row.get("away_team")),
             "home_logo":             team_logo_by_id(row.get("home_team_id")),
             "away_logo":             team_logo_by_id(row.get("away_team_id")),
+
             "home_starting_pitcher": safe_str(row.get("home_starting_pitcher")),
             "away_starting_pitcher": safe_str(row.get("away_starting_pitcher")),
             "home_sp_id":            safe_int(row.get("home_sp_id")),
             "away_sp_id":            safe_int(row.get("away_sp_id")),
+
             "ok":                    has_prediction,
+
+            # Model outputs
             "home_win_prob":         safe_float(row.get("home_win_prob")),
             "away_win_prob":         safe_float(row.get("away_win_prob")),
+            "home_win_prob_lo":      safe_float(row.get("home_win_prob_lo")),
+            "home_win_prob_hi":      safe_float(row.get("home_win_prob_hi")),
+            "home_win_prob_std":     safe_float(row.get("home_win_prob_std")),
+
             "home_moneyline_fair":   safe_int(row.get("home_ml_implied")),
             "away_moneyline_fair":   safe_int(row.get("away_ml_implied")),
+
             "pred_total_runs":       safe_float(row.get("total_runs_pred")),
+            "total_runs_lo":         safe_float(row.get("total_runs_lo")),
+            "total_runs_hi":         safe_float(row.get("total_runs_hi")),
+            "total_runs_std":        safe_float(row.get("total_runs_std")),
+
             "pred_run_diff":         safe_float(row.get("run_diff_pred")),
+            "run_diff_lo":           safe_float(row.get("run_diff_lo")),
+            "run_diff_hi":           safe_float(row.get("run_diff_hi")),
+            "run_diff_std":          safe_float(row.get("run_diff_std")),
+
             "ml_pick":               safe_str(row.get("ml_pick")),
             "runline_pick":          safe_str(row.get("runline_pick")),
             "ou_pick":               safe_str(row.get("ou_pick")),
+
+            # Top plays
+            "play_rank":             safe_int(row.get("play_rank")),
+            "play_type":             safe_str(row.get("play_type")),
+            "play_score":            safe_float(row.get("play_score")),
+            "play_detail":           safe_str(row.get("play_detail")),
+
             # Market odds
             "market_home_prob":      safe_float(row.get("market_home_prob")),
             "market_away_prob":      safe_float(row.get("market_away_prob")),
@@ -213,6 +269,7 @@ def api_predict_today(game_date: str = Query(..., description="YYYY-MM-DD")):
             "best_home_ml":          safe_int(row.get("best_home_ml")),
             "best_away_ml":          safe_int(row.get("best_away_ml")),
             "model_edge":            safe_float(row.get("model_edge")),
+
             "error":                 None if has_prediction else "No prediction available",
         })
 
