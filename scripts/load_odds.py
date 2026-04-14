@@ -337,7 +337,14 @@ def fetch_market_odds(target_date) -> list[dict]:
         avg_home_prob = round(avg_home_prob, 4)
         avg_away_prob = round(avg_away_prob, 4)
 
-        avg_total = round(sum(total_lines) / len(total_lines), 1) if total_lines else None
+        if total_lines:
+            from statistics import mode
+            try:
+                avg_total = mode(total_lines)
+            except Exception:
+                avg_total = round(sum(total_lines) / len(total_lines), 1)
+        else:
+            avg_total = None
 
         results.append({
             "odds_game_id": odds_game_id,

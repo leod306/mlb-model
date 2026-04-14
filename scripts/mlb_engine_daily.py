@@ -128,6 +128,12 @@ def ensure_predictions_table() -> None:
         bullpen_fip_diff DOUBLE PRECISION,
         park_run_factor DOUBLE PRECISION,
         temperature_f DOUBLE PRECISION, wind_speed_mph DOUBLE PRECISION,
+        run_diff_form_diff DOUBLE PRECISION,
+        runs_scored_diff DOUBLE PRECISION,
+        runs_allowed_diff DOUBLE PRECISION,
+        sp_rest_diff DOUBLE PRECISION,
+        bullpen_usage_diff DOUBLE PRECISION,
+        win_pct_diff DOUBLE PRECISION,
         home_win_prob DOUBLE PRECISION, away_win_prob DOUBLE PRECISION,
         home_win_prob_lo DOUBLE PRECISION, home_win_prob_hi DOUBLE PRECISION,
         home_win_prob_std DOUBLE PRECISION,
@@ -146,22 +152,28 @@ def ensure_predictions_table() -> None:
         conn.execute(text(sql))
 
     wanted = {
-        "sp_fip_diff": "DOUBLE PRECISION",
-        "offense_wrc_diff": "DOUBLE PRECISION",
-        "home_wrc_plus": "DOUBLE PRECISION",
-        "away_wrc_plus": "DOUBLE PRECISION",
-        "bullpen_fip_diff": "DOUBLE PRECISION",
-        "park_run_factor": "DOUBLE PRECISION",
-        "temperature_f": "DOUBLE PRECISION",
-        "wind_speed_mph": "DOUBLE PRECISION",
-        "market_home_prob": "DOUBLE PRECISION",
-        "market_away_prob": "DOUBLE PRECISION",
-        "market_total_line": "DOUBLE PRECISION",
-        "market_home_ml": "INT",
-        "market_away_ml": "INT",
-        "best_home_ml": "INT",
-        "best_away_ml": "INT",
-        "model_edge": "DOUBLE PRECISION",
+        "sp_fip_diff":        "DOUBLE PRECISION",
+        "offense_wrc_diff":   "DOUBLE PRECISION",
+        "home_wrc_plus":      "DOUBLE PRECISION",
+        "away_wrc_plus":      "DOUBLE PRECISION",
+        "bullpen_fip_diff":   "DOUBLE PRECISION",
+        "park_run_factor":    "DOUBLE PRECISION",
+        "temperature_f":      "DOUBLE PRECISION",
+        "wind_speed_mph":     "DOUBLE PRECISION",
+        "run_diff_form_diff": "DOUBLE PRECISION",
+        "runs_scored_diff":   "DOUBLE PRECISION",
+        "runs_allowed_diff":  "DOUBLE PRECISION",
+        "sp_rest_diff":       "DOUBLE PRECISION",
+        "bullpen_usage_diff": "DOUBLE PRECISION",
+        "win_pct_diff":       "DOUBLE PRECISION",
+        "market_home_prob":   "DOUBLE PRECISION",
+        "market_away_prob":   "DOUBLE PRECISION",
+        "market_total_line":  "DOUBLE PRECISION",
+        "market_home_ml":     "INT",
+        "market_away_ml":     "INT",
+        "best_home_ml":       "INT",
+        "best_away_ml":       "INT",
+        "model_edge":         "DOUBLE PRECISION",
     }
     existing = set(get_table_columns(PREDICTIONS_TABLE))
     with engine.begin() as conn:
@@ -178,8 +190,8 @@ def load_upcoming_games(target_date: Optional[date] = None) -> pd.DataFrame:
     if not table_exists(GAMES_TABLE):
         raise RuntimeError(f"Missing required table: {GAMES_TABLE}")
 
-    game_cols = set(get_table_columns(GAMES_TABLE))
-    has_team_ids     = "home_team_id" in game_cols and "away_team_id" in game_cols
+    game_cols         = set(get_table_columns(GAMES_TABLE))
+    has_team_ids      = "home_team_id" in game_cols and "away_team_id" in game_cols
     has_game_date_utc = "game_date_utc" in game_cols
 
     select_parts = ["game_pk", "official_date", "season", "home_team", "away_team"]
@@ -266,19 +278,18 @@ def load_pitcher_game_log() -> pd.DataFrame:
 
 
 def load_game_features(game_pks: list) -> pd.DataFrame:
-    """Load wRC+, FIP, bullpen, park factors, weather from game_features table."""
     if not game_pks or not table_exists(FEATURES_TABLE):
         return pd.DataFrame()
     try:
         sql = text(f"""
             SELECT game_pk,
-                   home_wrc_plus,   away_wrc_plus,
-                   home_sp_fip,     away_sp_fip,
+                   home_wrc_plus,    away_wrc_plus,
+                   home_sp_fip,      away_sp_fip,
                    home_bullpen_era, away_bullpen_era,
                    home_bullpen_fip, away_bullpen_fip,
-                   sp_fip_diff,     bullpen_fip_diff,  offense_wrc_diff,
-                   park_run_factor, park_hr_factor,
-                   temperature_f,   wind_speed_mph
+                   sp_fip_diff,      bullpen_fip_diff, offense_wrc_diff,
+                   park_run_factor,  park_hr_factor,
+                   temperature_f,    wind_speed_mph
             FROM {FEATURES_TABLE}
             WHERE game_pk = ANY(:pks)
         """)
@@ -322,11 +333,11 @@ def build_prior_baselines(team_games: pd.DataFrame) -> Dict[str, Dict[str, float
     )
     side_team = team_games.groupby(["season","team","side"], as_index=False).agg(win_pct=("win","mean"))
 
-    league_rs    = float(team_games["runs_scored"].mean())
-    league_ra    = float(team_games["runs_allowed"].mean())
-    league_rd    = float(team_games["run_diff"].mean())
-    league_hwp   = float(team_games.loc[team_games["side"]=="home","win"].mean())
-    league_awp   = float(team_games.loc[team_games["side"]=="away","win"].mean())
+    league_rs  = float(team_games["runs_scored"].mean())
+    league_ra  = float(team_games["runs_allowed"].mean())
+    league_rd  = float(team_games["run_diff"].mean())
+    league_hwp = float(team_games.loc[team_games["side"]=="home","win"].mean())
+    league_awp = float(team_games.loc[team_games["side"]=="away","win"].mean())
 
     baselines: Dict[str, Dict[str, float]] = {}
 
@@ -375,12 +386,11 @@ def get_team_blended_form(team_games, baselines, team, target_date, side, curren
     if games_played == 0:
         return {"runs_scored":float(default_base["runs_scored"]),"runs_allowed":float(default_base["runs_allowed"]),"run_diff":float(default_base["run_diff"]),"side_win_pct":base_side_wp,"games_played":0.0}
 
-    recent = team_hist.tail(rolling_window)
-    current_rs = float(recent["runs_scored"].mean())
-    current_ra = float(recent["runs_allowed"].mean())
-    current_rd = float(recent["run_diff"].mean())
-
-    side_hist = team_hist[team_hist["side"]==side]
+    recent         = team_hist.tail(rolling_window)
+    current_rs     = float(recent["runs_scored"].mean())
+    current_ra     = float(recent["runs_allowed"].mean())
+    current_rd     = float(recent["run_diff"].mean())
+    side_hist      = team_hist[team_hist["side"]==side]
     current_side_wp = coerce_float(side_hist["win"].mean(), base_side_wp) or base_side_wp
 
     if games_played >= blend_cutoff_games:
@@ -410,7 +420,10 @@ def latest_pitcher_stats_map(pitchers_df: pd.DataFrame) -> Dict[str, Dict[str, f
 def compute_league_pitcher_defaults(pitchers_df: pd.DataFrame) -> Dict[str, float]:
     if pitchers_df.empty:
         return {"era": 4.20, "whip": 1.30}
-    return {"era": coerce_float(pitchers_df["era"].mean(), 4.20) or 4.20, "whip": coerce_float(pitchers_df["whip"].mean(), 1.30) or 1.30}
+    return {
+        "era":  coerce_float(pitchers_df["era"].mean(),  4.20) or 4.20,
+        "whip": coerce_float(pitchers_df["whip"].mean(), 1.30) or 1.30,
+    }
 
 
 def get_pitcher_stats(pitcher_name, pitcher_map, league_defaults):
@@ -430,7 +443,7 @@ def get_sp_rest_days(pgl_df, pitcher_name, target_date):
     if pgl_df.empty or pitcher_name is None or pd.isna(pitcher_name):
         return 5.0
     key = str(pitcher_name).strip().lower()
-    q = pgl_df[(pgl_df["pitcher_name_key"]==key) & (pgl_df["role"]=="SP") & (pgl_df["official_date"] < target_date)].sort_values("official_date")
+    q   = pgl_df[(pgl_df["pitcher_name_key"]==key) & (pgl_df["role"]=="SP") & (pgl_df["official_date"] < target_date)].sort_values("official_date")
     if q.empty:
         return 5.0
     try:
@@ -458,26 +471,28 @@ def load_model_bundle() -> Dict[str, Any]:
     if not isinstance(obj, dict):
         raise RuntimeError("Expected ensemble bundle dict in mlb_model.pkl")
     return {
-        "win_models":    obj["win_models"],
-        "run_models":    obj["run_diff_models"],
-        "total_models":  obj["total_runs_models"],
-        "feature_cols":  obj.get("feature_cols"),
-        "n_models":      obj.get("n_models"),
+        "win_models":   obj["win_models"],
+        "run_models":   obj["run_diff_models"],
+        "total_models": obj["total_runs_models"],
+        "feature_cols": obj.get("feature_cols"),
+        "n_models":     obj.get("n_models"),
     }
 
 
 def predict_ml_ensemble(models, X):
+    """25-75 percentile CI — tighter than 5-95, gives more actionable picks."""
     preds = np.column_stack([m.predict_proba(X)[:, 1] for m in models])
-    return preds.mean(axis=1), np.percentile(preds,5,axis=1), np.percentile(preds,95,axis=1), preds.std(axis=1)
+    return preds.mean(axis=1), np.percentile(preds,25,axis=1), np.percentile(preds,75,axis=1), preds.std(axis=1)
 
 
 def predict_regression_ensemble(models, X):
+    """25-75 percentile CI — tighter than 5-95, gives more actionable picks."""
     preds = np.column_stack([m.predict(X) for m in models])
-    return preds.mean(axis=1), np.percentile(preds,5,axis=1), np.percentile(preds,95,axis=1), preds.std(axis=1)
+    return preds.mean(axis=1), np.percentile(preds,25,axis=1), np.percentile(preds,75,axis=1), preds.std(axis=1)
 
 
 # =============================================================================
-# FEATURE BUILDING — now includes game_features (wRC+, FIP, park, weather)
+# FEATURE BUILDING
 # =============================================================================
 
 def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
@@ -485,11 +500,10 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
     team_games      = build_team_game_log(completed_games)
     baselines       = build_prior_baselines(team_games)
 
-    probables_df    = load_probables()
-    pitchers_df     = load_pitchers()
-    pgl_df          = load_pitcher_game_log()
-
-    pitcher_map           = latest_pitcher_stats_map(pitchers_df)
+    probables_df            = load_probables()
+    pitchers_df             = load_pitchers()
+    pgl_df                  = load_pitcher_game_log()
+    pitcher_map             = latest_pitcher_stats_map(pitchers_df)
     league_pitcher_defaults = compute_league_pitcher_defaults(pitchers_df)
 
     merged = games_df.merge(probables_df, on="game_pk", how="left") if not probables_df.empty else games_df.assign(away_sp_name=None, home_sp_name=None)
@@ -517,15 +531,28 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         home_p = get_pitcher_stats(home_sp_name, pitcher_map, league_pitcher_defaults)
         away_p = get_pitcher_stats(away_sp_name, pitcher_map, league_pitcher_defaults)
 
-        # game_features values (fall back to defaults if not joined)
-        home_wrc    = coerce_float(row.get("home_wrc_plus"),   100.0) or 100.0
-        away_wrc    = coerce_float(row.get("away_wrc_plus"),   100.0) or 100.0
-        sp_fip_diff = coerce_float(row.get("sp_fip_diff"),     0.0)   or 0.0
-        bp_fip_diff = coerce_float(row.get("bullpen_fip_diff"),0.0)   or 0.0
-        wrc_diff    = coerce_float(row.get("offense_wrc_diff"),0.0)   or 0.0
-        park_rf     = coerce_float(row.get("park_run_factor"), 1.0)   or 1.0
-        temp_f      = coerce_float(row.get("temperature_f"),   72.0)  or 72.0
-        wind_mph    = coerce_float(row.get("wind_speed_mph"),  7.0)   or 7.0
+        home_sp_rest  = float(get_sp_rest_days(pgl_df, home_sp_name, target_date))
+        away_sp_rest  = float(get_sp_rest_days(pgl_df, away_sp_name, target_date))
+        home_bp_ip    = float(get_bullpen_ip_4d(pgl_df, home_team, target_date))
+        away_bp_ip    = float(get_bullpen_ip_4d(pgl_df, away_team, target_date))
+        home_win_pct  = float(home_form["side_win_pct"])
+        away_win_pct  = float(away_form["side_win_pct"])
+        home_rs       = float(home_form["runs_scored"])
+        away_rs       = float(away_form["runs_scored"])
+        home_ra       = float(home_form["runs_allowed"])
+        away_ra       = float(away_form["runs_allowed"])
+        home_rd       = float(home_form["run_diff"])
+        away_rd       = float(away_form["run_diff"])
+
+        # game_features values
+        home_wrc    = coerce_float(row.get("home_wrc_plus"),    100.0) or 100.0
+        away_wrc    = coerce_float(row.get("away_wrc_plus"),    100.0) or 100.0
+        sp_fip_diff = coerce_float(row.get("sp_fip_diff"),      0.0)   or 0.0
+        bp_fip_diff = coerce_float(row.get("bullpen_fip_diff"), 0.0)   or 0.0
+        wrc_diff    = coerce_float(row.get("offense_wrc_diff"), 0.0)   or 0.0
+        park_rf     = coerce_float(row.get("park_run_factor"),  1.0)   or 1.0
+        temp_f      = coerce_float(row.get("temperature_f"),    72.0)  or 72.0
+        wind_mph    = coerce_float(row.get("wind_speed_mph"),   7.0)   or 7.0
 
         rows.append({
             "game_pk":         int(row["game_pk"]),
@@ -536,25 +563,25 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
             "home_team_id":    row.get("home_team_id"),
             "away_sp_name":    away_sp_name,
             "home_sp_name":    home_sp_name,
-            # Pitcher ERA/WHIP
+            # Pitcher quality
             "era_diff":        float(home_p["era"]  - away_p["era"]),
             "whip_diff":       float(home_p["whip"] - away_p["whip"]),
             # Rest + bullpen
-            "home_sp_rest_days":  float(get_sp_rest_days(pgl_df, home_sp_name, target_date)),
-            "away_sp_rest_days":  float(get_sp_rest_days(pgl_df, away_sp_name, target_date)),
-            "home_bullpen_ip_4d": float(get_bullpen_ip_4d(pgl_df, home_team, target_date)),
-            "away_bullpen_ip_4d": float(get_bullpen_ip_4d(pgl_df, away_team, target_date)),
+            "home_sp_rest_days":  home_sp_rest,
+            "away_sp_rest_days":  away_sp_rest,
+            "home_bullpen_ip_4d": home_bp_ip,
+            "away_bullpen_ip_4d": away_bp_ip,
             # Win% splits
-            "home_win_pct_home": float(home_form["side_win_pct"]),
-            "away_win_pct_away": float(away_form["side_win_pct"]),
+            "home_win_pct_home": home_win_pct,
+            "away_win_pct_away": away_win_pct,
             # Rolling team form
-            "home_last10_runs_scored":  float(home_form["runs_scored"]),
-            "away_last10_runs_scored":  float(away_form["runs_scored"]),
-            "home_last10_runs_allowed": float(home_form["runs_allowed"]),
-            "away_last10_runs_allowed": float(away_form["runs_allowed"]),
-            "home_last10_run_diff":     float(home_form["run_diff"]),
-            "away_last10_run_diff":     float(away_form["run_diff"]),
-            # game_features — FIP, wRC+, park, weather
+            "home_last10_runs_scored":  home_rs,
+            "away_last10_runs_scored":  away_rs,
+            "home_last10_runs_allowed": home_ra,
+            "away_last10_runs_allowed": away_ra,
+            "home_last10_run_diff":     home_rd,
+            "away_last10_run_diff":     away_rd,
+            # game_features
             "sp_fip_diff":      sp_fip_diff,
             "offense_wrc_diff": wrc_diff,
             "home_wrc_plus":    home_wrc,
@@ -563,20 +590,25 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
             "park_run_factor":  park_rf,
             "temperature_f":    temp_f,
             "wind_speed_mph":   wind_mph,
+            # Differential features — reduce home/away symmetry
+            "run_diff_form_diff":  home_rd    - away_rd,
+            "runs_scored_diff":    home_rs    - away_rs,
+            "runs_allowed_diff":   home_ra    - away_ra,
+            "sp_rest_diff":        home_sp_rest - away_sp_rest,
+            "bullpen_usage_diff":  home_bp_ip   - away_bp_ip,
+            "win_pct_diff":        home_win_pct - away_win_pct,
         })
 
     features_df = pd.DataFrame(rows)
 
     log("Feature nunique:")
     preview_cols = [
-        "era_diff","whip_diff","sp_fip_diff","offense_wrc_diff",
-        "home_wrc_plus","away_wrc_plus","bullpen_fip_diff",
-        "park_run_factor","temperature_f","wind_speed_mph",
-        "home_sp_rest_days","away_sp_rest_days",
-        "home_bullpen_ip_4d","away_bullpen_ip_4d",
-        "home_win_pct_home","away_win_pct_away",
-        "home_last10_runs_scored","away_last10_runs_scored",
-        "home_last10_run_diff","away_last10_run_diff",
+        "era_diff","whip_diff",
+        "home_sp_rest_days","away_sp_rest_days","sp_rest_diff",
+        "home_bullpen_ip_4d","away_bullpen_ip_4d","bullpen_usage_diff",
+        "home_win_pct_home","away_win_pct_away","win_pct_diff",
+        "home_last10_runs_scored","away_last10_runs_scored","runs_scored_diff",
+        "home_last10_run_diff","away_last10_run_diff","run_diff_form_diff",
     ]
     if not features_df.empty:
         log(features_df[[c for c in preview_cols if c in features_df.columns]].nunique(dropna=False).to_string())
@@ -595,8 +627,8 @@ def build_pick_columns(df: pd.DataFrame) -> pd.DataFrame:
         lo = coerce_float(r.get("home_win_prob_lo"))
         hi = coerce_float(r.get("home_win_prob_hi"))
         if lo is None or hi is None: return None
-        if lo > 0.5:  return r["home_team"]
-        if hi < 0.5:  return r["away_team"]
+        if lo > 0.45: return r["home_team"]
+        if hi < 0.55: return r["away_team"]
         return "PASS"
 
     def runline_pick(r):
@@ -614,9 +646,9 @@ def build_pick_columns(df: pd.DataFrame) -> pd.DataFrame:
         if hi < DEFAULT_TOTAL_LINE: return "UNDER"
         return "PASS"
 
-    df["ml_pick"]      = df.apply(ml_pick, axis=1)
-    df["runline_pick"] = df.apply(runline_pick, axis=1)
-    df["ou_pick"]      = df.apply(ou_pick, axis=1)
+    df["ml_pick"]      = df.apply(ml_pick,      axis=1)
+    df["runline_pick"] = df.apply(runline_pick,  axis=1)
+    df["ou_pick"]      = df.apply(ou_pick,       axis=1)
     return df
 
 
@@ -624,16 +656,19 @@ def build_top_plays(df, total_line=DEFAULT_TOTAL_LINE):
     rows = []
     for _, r in df.iterrows():
         away, home = r["away_team"], r["home_team"]
-        lo = coerce_float(r.get("home_win_prob_lo"))
-        hi = coerce_float(r.get("home_win_prob_hi"))
+        lo   = coerce_float(r.get("home_win_prob_lo"))
+        hi   = coerce_float(r.get("home_win_prob_hi"))
         mean = coerce_float(r.get("home_win_prob"))
+
         if lo and lo > 0.5:
             rows.append({"game_pk":r["game_pk"],"bet_type":"ML","pick":home,"matchup":f"{away} @ {home}","score":lo-0.5,"model_value":mean,"extra":f"CI: {lo:.3f} to {hi:.3f}"})
         elif hi and hi < 0.5:
             rows.append({"game_pk":r["game_pk"],"bet_type":"ML","pick":away,"matchup":f"{away} @ {home}","score":0.5-hi,"model_value":1-mean if mean else None,"extra":f"Home CI: {lo:.3f} to {hi:.3f}"})
-        tlo = coerce_float(r.get("total_runs_lo"))
-        thi = coerce_float(r.get("total_runs_hi"))
+
+        tlo   = coerce_float(r.get("total_runs_lo"))
+        thi   = coerce_float(r.get("total_runs_hi"))
         tmean = coerce_float(r.get("total_runs_pred"))
+
         if tlo and tlo > total_line:
             rows.append({"game_pk":r["game_pk"],"bet_type":"O/U","pick":"OVER","matchup":f"{away} @ {home}","score":tlo-total_line,"model_value":tmean,"extra":f"CI: {tlo:.2f} to {thi:.2f} | line {total_line}"})
         elif thi and thi < total_line:
@@ -654,7 +689,6 @@ def upsert_predictions(pred_df: pd.DataFrame) -> None:
 
     ensure_predictions_table()
 
-    # Build column list dynamically from what's in pred_df
     base_cols = [
         "game_pk","official_date","away_team","home_team",
         "away_team_id","home_team_id","away_sp_name","home_sp_name",
@@ -669,6 +703,8 @@ def upsert_predictions(pred_df: pd.DataFrame) -> None:
         "home_wrc_plus","away_wrc_plus",
         "bullpen_fip_diff","park_run_factor",
         "temperature_f","wind_speed_mph",
+        "run_diff_form_diff","runs_scored_diff","runs_allowed_diff",
+        "sp_rest_diff","bullpen_usage_diff","win_pct_diff",
         "home_win_prob","away_win_prob",
         "home_win_prob_lo","home_win_prob_hi","home_win_prob_std",
         "home_ml_implied","away_ml_implied",
@@ -678,7 +714,7 @@ def upsert_predictions(pred_df: pd.DataFrame) -> None:
         "play_rank","play_type","play_score","play_detail",
     ]
 
-    cols = [c for c in base_cols if c in pred_df.columns]
+    cols       = [c for c in base_cols if c in pred_df.columns]
     col_str    = ", ".join(cols)
     val_str    = ", ".join(f":{c}" for c in cols)
     update_str = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols if c != "game_pk")
@@ -727,19 +763,16 @@ def main() -> None:
 
     bundle = load_model_bundle()
 
-    # Default feature cols — updated to include game_features columns
     feature_cols = bundle.get("feature_cols") or [
         "era_diff", "whip_diff",
-        "sp_fip_diff", "offense_wrc_diff",
-        "home_wrc_plus", "away_wrc_plus",
-        "bullpen_fip_diff",
-        "park_run_factor", "temperature_f", "wind_speed_mph",
         "home_sp_rest_days", "away_sp_rest_days",
         "home_bullpen_ip_4d", "away_bullpen_ip_4d",
         "home_win_pct_home", "away_win_pct_away",
         "home_last10_runs_scored", "away_last10_runs_scored",
         "home_last10_runs_allowed", "away_last10_runs_allowed",
         "home_last10_run_diff", "away_last10_run_diff",
+        "run_diff_form_diff", "runs_scored_diff", "runs_allowed_diff",
+        "sp_rest_diff", "bullpen_usage_diff", "win_pct_diff",
     ]
 
     for col in feature_cols:
@@ -758,28 +791,28 @@ def main() -> None:
     total_pred,total_lo,total_hi,total_std= predict_regression_ensemble(bundle["total_models"], X)
 
     out = features_df.copy()
-    out["home_win_prob"]    = home_prob
-    out["away_win_prob"]    = 1.0 - home_prob
-    out["home_win_prob_lo"] = home_lo
-    out["home_win_prob_hi"] = home_hi
-    out["home_win_prob_std"]= home_std
-    out["home_ml_implied"]  = out["home_win_prob"].apply(safe_moneyline_from_prob)
-    out["away_ml_implied"]  = out["away_win_prob"].apply(safe_moneyline_from_prob)
-    out["run_diff_pred"]    = run_pred
-    out["run_diff_lo"]      = run_lo
-    out["run_diff_hi"]      = run_hi
-    out["run_diff_std"]     = run_std
-    out["total_runs_pred"]  = total_pred
-    out["total_runs_lo"]    = total_lo
-    out["total_runs_hi"]    = total_hi
-    out["total_runs_std"]   = total_std
+    out["home_win_prob"]     = home_prob
+    out["away_win_prob"]     = 1.0 - home_prob
+    out["home_win_prob_lo"]  = home_lo
+    out["home_win_prob_hi"]  = home_hi
+    out["home_win_prob_std"] = home_std
+    out["home_ml_implied"]   = out["home_win_prob"].apply(safe_moneyline_from_prob)
+    out["away_ml_implied"]   = out["away_win_prob"].apply(safe_moneyline_from_prob)
+    out["run_diff_pred"]     = run_pred
+    out["run_diff_lo"]       = run_lo
+    out["run_diff_hi"]       = run_hi
+    out["run_diff_std"]      = run_std
+    out["total_runs_pred"]   = total_pred
+    out["total_runs_lo"]     = total_lo
+    out["total_runs_hi"]     = total_hi
+    out["total_runs_std"]    = total_std
 
     out = build_pick_columns(out)
 
     top_plays = build_top_plays(out)
-    out["play_rank"] = None
-    out["play_type"] = None
-    out["play_score"]= None
+    out["play_rank"]  = None
+    out["play_type"]  = None
+    out["play_score"] = None
     out["play_detail"]= None
 
     if top_plays.empty:

@@ -29,6 +29,24 @@ else:
 
 
 # ---------------------------------------------------------------------------
+# Compute differential features if not already in CSV
+# ---------------------------------------------------------------------------
+
+def add_diff(df, col_a, col_b, new_col, default_a=0.0, default_b=0.0):
+    a = pd.to_numeric(df.get(col_a, default_a), errors="coerce").fillna(default_a)
+    b = pd.to_numeric(df.get(col_b, default_b), errors="coerce").fillna(default_b)
+    df[new_col] = a - b
+    return df
+
+df = add_diff(df, "home_last10_run_diff",    "away_last10_run_diff",    "run_diff_form_diff")
+df = add_diff(df, "home_last10_runs_scored", "away_last10_runs_scored", "runs_scored_diff")
+df = add_diff(df, "home_last10_runs_allowed","away_last10_runs_allowed","runs_allowed_diff")
+df = add_diff(df, "home_sp_rest_days",       "away_sp_rest_days",       "sp_rest_diff",       5.0, 5.0)
+df = add_diff(df, "home_bullpen_ip_4d",      "away_bullpen_ip_4d",      "bullpen_usage_diff",  4.0, 4.0)
+df = add_diff(df, "home_win_pct_home",       "away_win_pct_away",       "win_pct_diff",        0.5, 0.5)
+
+
+# ---------------------------------------------------------------------------
 # Feature set
 # ---------------------------------------------------------------------------
 
@@ -55,7 +73,21 @@ ROLLING_FEATURES = [
     "away_last10_run_diff",
 ]
 
-FEATURES = PITCHER_FEATURES + SITUATIONAL_FEATURES + ROLLING_FEATURES
+DIFFERENTIAL_FEATURES = [
+    "run_diff_form_diff",   # home run diff trend minus away run diff trend
+    "runs_scored_diff",     # home scoring vs away scoring
+    "runs_allowed_diff",    # home pitching/defense vs away
+    "sp_rest_diff",         # rest advantage
+    "bullpen_usage_diff",   # bullpen fatigue gap
+    "win_pct_diff",         # home win% at home vs away win% on road
+]
+
+FEATURES = (
+    PITCHER_FEATURES +
+    SITUATIONAL_FEATURES +
+    ROLLING_FEATURES +
+    DIFFERENTIAL_FEATURES
+)
 
 print(f"\nFeature set ({len(FEATURES)} features):")
 for f in FEATURES:
@@ -68,18 +100,26 @@ print()
 # ---------------------------------------------------------------------------
 
 defaults = {
-    "home_sp_rest_days": 5.0,
-    "away_sp_rest_days": 5.0,
-    "home_bullpen_ip_4d": 4.0,
-    "away_bullpen_ip_4d": 4.0,
-    "home_win_pct_home": 0.5,
-    "away_win_pct_away": 0.5,
-    "home_last10_runs_scored": 4.5,
-    "away_last10_runs_scored": 4.5,
+    "era_diff":               0.0,
+    "whip_diff":              0.0,
+    "home_sp_rest_days":      5.0,
+    "away_sp_rest_days":      5.0,
+    "home_bullpen_ip_4d":     4.0,
+    "away_bullpen_ip_4d":     4.0,
+    "home_win_pct_home":      0.5,
+    "away_win_pct_away":      0.5,
+    "home_last10_runs_scored":  4.5,
+    "away_last10_runs_scored":  4.5,
     "home_last10_runs_allowed": 4.5,
     "away_last10_runs_allowed": 4.5,
-    "home_last10_run_diff": 0.0,
-    "away_last10_run_diff": 0.0,
+    "home_last10_run_diff":     0.0,
+    "away_last10_run_diff":     0.0,
+    "run_diff_form_diff":   0.0,
+    "runs_scored_diff":     0.0,
+    "runs_allowed_diff":    0.0,
+    "sp_rest_diff":         0.0,
+    "bullpen_usage_diff":   0.0,
+    "win_pct_diff":         0.0,
 }
 
 for col, default in defaults.items():
@@ -101,7 +141,6 @@ df = df.dropna(subset=["game_date"]).sort_values("game_date").copy()
 
 for col in FEATURES:
     df[col] = pd.to_numeric(df[col], errors="coerce")
-
 df[FEATURES] = df[FEATURES].fillna(defaults)
 
 split_index = int(len(df) * 0.8)
@@ -122,7 +161,7 @@ print(f"Training on {len(train)} games, testing on {len(test)} games\n")
 
 
 # ---------------------------------------------------------------------------
-# Ensemble helpers
+# Ensemble helpers (unchanged)
 # ---------------------------------------------------------------------------
 
 N_MODELS = 20
@@ -195,7 +234,7 @@ def ensemble_classification_predict(models, X: pd.DataFrame):
 
 
 # ---------------------------------------------------------------------------
-# Train ensembles
+# Train
 # ---------------------------------------------------------------------------
 
 print("Training run differential ensemble...")
@@ -246,7 +285,7 @@ joblib.dump(win_models,   win_models_path)
 meta = {
     "features":      FEATURES,
     "team_classes_": le.classes_.tolist(),
-    "note":          "Ensemble models with pitcher + situational + rolling blended team-form features",
+    "note":          "Ensemble — pitcher + situational + rolling + differential features",
     "n_models":      N_MODELS,
 }
 joblib.dump(meta, meta_path)
