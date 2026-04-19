@@ -633,10 +633,10 @@ def build_pick_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     def runline_pick(r):
         rd = coerce_float(r.get("run_diff_pred"))
-        if rd is None: return None
-        if rd >  1.5: return f"{r['home_team']} -1.5"
+        if rd is None: return "PASS"
+        if rd > 1.5: return f"{r['home_team']} -1.5"
         if rd < -1.5: return f"{r['away_team']} -1.5"
-        return f"{r['away_team']} +1.5"
+        return "PASS"  # ← change default to PASS instead of away +1.5
 
     def ou_pick(r):
         lo = coerce_float(r.get("total_runs_lo"))

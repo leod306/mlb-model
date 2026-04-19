@@ -1,0 +1,405 @@
+{% extends "base.html" %}
+{% block title %}Model Stats{% endblock %}
+{% block content %}
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700&display=swap');
+
+  .stats-wrap { max-width: 1100px; margin: 0 auto; padding: 2rem 1rem; }
+
+  .stats-header { margin-bottom: 2rem; }
+  .stats-header h1 { font-family: 'Syne', sans-serif; font-size: 2rem; font-weight: 700; letter-spacing: -.02em; margin-bottom: .25rem; }
+  .stats-header p  { color: #64748b; font-size: .9rem; }
+
+  /* Filter bar */
+  .filter-bar { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1.75rem; align-items: center; }
+  .filter-group { display: flex; gap: .25rem; background: #f1f5f9; border-radius: 10px; padding: 3px; }
+  .filter-group-label { font-size: .72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: #94a3b8; align-self: center; margin-right: .25rem; }
+  .filter-btn {
+    padding: 5px 12px; border-radius: 8px; border: none; background: transparent;
+    font-size: .8rem; font-weight: 500; color: #64748b; cursor: pointer; transition: all .15s;
+  }
+  .filter-btn:hover { background: #e2e8f0; color: #334155; }
+  .filter-btn.active { background: #fff; color: #1e293b; box-shadow: 0 1px 3px rgba(0,0,0,.1); font-weight: 600; }
+  .filter-divider { width: 1px; background: #e2e8f0; margin: 0 .25rem; align-self: stretch; }
+  .filter-summary { font-size: .8rem; color: #94a3b8; margin-left: auto; align-self: center; }
+
+  /* Stat cards */
+  .card-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 2rem; }
+  .stat-card { border-radius: 14px; padding: 1.25rem 1.5rem; }
+  .stat-card.green  { background: #f0fdf4; border: 1px solid #bbf7d0; }
+  .stat-card.red    { background: #fff1f2; border: 1px solid #fecdd3; }
+  .stat-card.yellow { background: #fefce8; border: 1px solid #fde68a; }
+  .stat-card .label { font-size: .75rem; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: #94a3b8; margin-bottom: .5rem; }
+  .stat-card .pct   { font-family: 'Syne', sans-serif; font-size: 2.5rem; font-weight: 700; line-height: 1; margin-bottom: .25rem; }
+  .stat-card.green  .pct { color: #15803d; }
+  .stat-card.red    .pct { color: #be123c; }
+  .stat-card.yellow .pct { color: #a16207; }
+  .stat-card .record { font-family: 'DM Mono', monospace; font-size: .8rem; color: #64748b; }
+  .stat-card .edge   { font-size: .75rem; font-weight: 600; margin-top: .4rem; padding: 2px 8px; border-radius: 20px; display: inline-block; }
+  .stat-card.green  .edge { background: #dcfce7; color: #15803d; }
+  .stat-card.red    .edge { background: #ffe4e6; color: #be123c; }
+  .stat-card.yellow .edge { background: #fef9c3; color: #a16207; }
+
+  .section-title { font-family: 'Syne', sans-serif; font-size: 1rem; font-weight: 600; color: #1e293b; margin: 2rem 0 1rem; display: flex; align-items: center; gap: .5rem; }
+  .section-title::after { content: ''; flex: 1; height: 1px; background: #e2e8f0; }
+
+  .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1.5rem; }
+  .chart-box { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 1.25rem; }
+  .chart-box.full { grid-column: 1 / -1; }
+  .chart-box h3 { font-size: .8rem; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: #94a3b8; margin-bottom: 1rem; }
+
+  .results-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+  .results-table th { text-align: left; padding: 8px 10px; font-size: .72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: #94a3b8; border-bottom: 2px solid #f1f5f9; white-space: nowrap; }
+  .results-table td { padding: 9px 10px; border-bottom: 1px solid #f8fafc; color: #334155; vertical-align: middle; }
+  .results-table tr:hover td { background: #f8fafc; }
+  .results-table tr.win-row  td { background: #f0fdf4; }
+  .results-table tr.loss-row td { background: #fff1f2; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: .72rem; font-weight: 600; font-family: 'DM Mono', monospace; white-space: nowrap; }
+  .badge.win     { background: #dcfce7; color: #15803d; }
+  .badge.loss    { background: #ffe4e6; color: #be123c; }
+  .badge.pass    { background: #f1f5f9; color: #94a3b8; }
+  .badge.pending { background: #fef9c3; color: #a16207; }
+
+  .mono       { font-family: 'DM Mono', monospace; font-size: .78rem; }
+  .team-name  { font-weight: 600; color: #1e293b; }
+  .sp-name    { color: #64748b; font-size: .75rem; }
+  .no-data    { text-align: center; padding: 2rem; color: #94a3b8; font-size: .9rem; }
+  .loading    { text-align: center; padding: 3rem; color: #94a3b8; font-size: .9rem; }
+
+  @media (max-width: 700px) {
+    .card-grid  { grid-template-columns: 1fr; }
+    .chart-grid { grid-template-columns: 1fr; }
+    .chart-box.full { grid-column: 1; }
+    .filter-bar { gap: .35rem; }
+  }
+</style>
+
+<div class="stats-wrap">
+  <div class="stats-header">
+    <h1>Model Performance</h1>
+    <p>Season record updated daily · Break-even = 52.4% · Sharp target = 57%+</p>
+  </div>
+
+  <!-- Filter bar -->
+  <div class="filter-bar" id="filter-bar" style="display:none">
+    <span class="filter-group-label">Range</span>
+    <div class="filter-group">
+      <button class="filter-btn active" data-filter="all">All</button>
+      <button class="filter-btn" data-filter="last7">Last 7d</button>
+      <button class="filter-btn" data-filter="last14">Last 14d</button>
+      <button class="filter-btn" data-filter="thismonth">This month</button>
+    </div>
+    <div class="filter-divider"></div>
+    <span class="filter-group-label">Day</span>
+    <div class="filter-group">
+      <button class="filter-btn" data-filter="mon">Mon</button>
+      <button class="filter-btn" data-filter="tue">Tue</button>
+      <button class="filter-btn" data-filter="wed">Wed</button>
+      <button class="filter-btn" data-filter="thu">Thu</button>
+      <button class="filter-btn" data-filter="fri">Fri</button>
+      <button class="filter-btn" data-filter="sat">Sat</button>
+      <button class="filter-btn" data-filter="sun">Sun</button>
+    </div>
+    <span class="filter-summary" id="filter-summary"></span>
+  </div>
+
+  <div id="content">
+    <div class="loading">Loading stats...</div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+const BREAK_EVEN = 52.4;
+const DAY_NAMES  = ['sun','mon','tue','wed','thu','fri','sat'];
+
+let ALL_DATA    = null;
+let trendChart  = null;
+let barChart    = null;
+let scatterChart= null;
+let activeFilter= 'all';
+
+// ── Filter logic ─────────────────────────────────────────────────────────────
+function filterDaily(daily, filter) {
+  const today = new Date();
+  today.setHours(0,0,0,0);
+
+  if (filter === 'all') return daily;
+
+  if (filter === 'last7') {
+    const cutoff = new Date(today); cutoff.setDate(cutoff.getDate() - 7);
+    return daily.filter(d => new Date(d.date) >= cutoff);
+  }
+  if (filter === 'last14') {
+    const cutoff = new Date(today); cutoff.setDate(cutoff.getDate() - 14);
+    return daily.filter(d => new Date(d.date) >= cutoff);
+  }
+  if (filter === 'thismonth') {
+    const m = today.getMonth(), y = today.getFullYear();
+    return daily.filter(d => { const dt = new Date(d.date); return dt.getMonth()===m && dt.getFullYear()===y; });
+  }
+  // Day of week filter
+  if (DAY_NAMES.includes(filter)) {
+    const idx = DAY_NAMES.indexOf(filter);
+    return daily.filter(d => new Date(d.date + 'T12:00:00').getDay() === idx);
+  }
+  return daily;
+}
+
+function filterPicks(picks, filter) {
+  const today = new Date(); today.setHours(0,0,0,0);
+  if (filter === 'all') return picks;
+  if (filter === 'last7') {
+    const cutoff = new Date(today); cutoff.setDate(cutoff.getDate() - 7);
+    return picks.filter(p => new Date(p.date) >= cutoff);
+  }
+  if (filter === 'last14') {
+    const cutoff = new Date(today); cutoff.setDate(cutoff.getDate() - 14);
+    return picks.filter(p => new Date(p.date) >= cutoff);
+  }
+  if (filter === 'thismonth') {
+    const m = today.getMonth(), y = today.getFullYear();
+    return picks.filter(p => { const dt = new Date(p.date + 'T12:00:00'); return dt.getMonth()===m && dt.getFullYear()===y; });
+  }
+  if (DAY_NAMES.includes(filter)) {
+    const idx = DAY_NAMES.indexOf(filter);
+    return picks.filter(p => new Date(p.date + 'T12:00:00').getDay() === idx);
+  }
+  return picks;
+}
+
+// ── Aggregate daily → totals ─────────────────────────────────────────────────
+function aggregateTotals(daily) {
+  const t = { ml_wins:0, ml_total:0, rl_wins:0, rl_total:0, ou_wins:0, ou_total:0 };
+  daily.forEach(d => {
+    t.ml_wins  += d.ml_wins;  t.ml_total  += d.ml_total;
+    t.rl_wins  += d.rl_wins;  t.rl_total  += d.rl_total;
+    t.ou_wins  += d.ou_wins;  t.ou_total  += d.ou_total;
+  });
+  const wr = (w, t) => t ? +(w/t*100).toFixed(1) : 0;
+  return {
+    ml: { wins: t.ml_wins, total: t.ml_total, pct: wr(t.ml_wins, t.ml_total) },
+    rl: { wins: t.rl_wins, total: t.rl_total, pct: wr(t.rl_wins, t.rl_total) },
+    ou: { wins: t.ou_wins, total: t.ou_total, pct: wr(t.ou_wins, t.ou_total) },
+  };
+}
+
+// ── Render helpers ────────────────────────────────────────────────────────────
+function cardClass(pct) { return pct >= 57 ? 'green' : pct >= 52.4 ? 'yellow' : 'red'; }
+function edgeStr(pct)   { const e=(pct-BREAK_EVEN).toFixed(1); return (e>=0?'+':'')+e+'% vs break-even'; }
+
+function renderCards(totals) {
+  return [
+    { key:'ml', label:'Moneyline'  },
+    { key:'rl', label:'Run Line'   },
+    { key:'ou', label:'Over/Under' },
+  ].map(m => {
+    const d = totals[m.key], cl = cardClass(d.pct);
+    return `<div class="stat-card ${cl}">
+      <div class="label">${m.label}</div>
+      <div class="pct">${d.pct}%</div>
+      <div class="record mono">${d.wins}W – ${d.total - d.wins}L of ${d.total}</div>
+      <span class="edge">${edgeStr(d.pct)}</span>
+    </div>`;
+  }).join('');
+}
+
+function badgeHtml(correct, evaluated) {
+  if (!evaluated)         return '<span class="badge pending">Pending</span>';
+  if (correct === true)   return '<span class="badge win">✓ Win</span>';
+  if (correct === false)  return '<span class="badge loss">✗ Loss</span>';
+  return '<span class="badge pass">Pass</span>';
+}
+
+function renderTable(picks) {
+  if (!picks.length) return '<div class="no-data">No picks for this filter.</div>';
+  const rows = picks.map(p => {
+    const rc = p.evaluated && p.ml_correct===true ? 'win-row' : p.evaluated && p.ml_correct===false ? 'loss-row' : '';
+    return `<tr class="${rc}">
+      <td class="mono" style="color:#94a3b8">${p.date.slice(5)}</td>
+      <td>
+        <div class="team-name">${p.away_team} @ ${p.home_team}</div>
+        <div class="sp-name">${p.away_sp} vs ${p.home_sp}</div>
+      </td>
+      <td>${badgeHtml(p.ml_correct,p.evaluated)}<br><span style="font-size:.72rem;color:#64748b">${p.ml_pick||'—'} ${p.win_prob?'('+p.win_prob+'%)':''}</span></td>
+      <td>${badgeHtml(p.rl_correct,p.evaluated)}<br><span class="mono" style="font-size:.72rem;color:#64748b">${p.rl_pick||'—'}</span></td>
+      <td>${badgeHtml(p.ou_correct,p.evaluated)}<br><span class="mono" style="font-size:.72rem;color:#64748b">${p.ou_pick||'—'} ${p.vegas_line?'('+p.vegas_line+')':''}</span></td>
+      <td class="mono">${p.pred_score}</td>
+      <td class="mono" style="font-weight:600">${p.actual_score}</td>
+    </tr>`;
+  }).join('');
+  return `<div style="overflow-x:auto">
+    <table class="results-table">
+      <thead><tr>
+        <th>Date</th><th>Matchup</th><th>Moneyline</th><th>Run Line</th><th>O/U</th><th>Pred Score</th><th>Actual Score</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+// ── Charts ────────────────────────────────────────────────────────────────────
+function buildTrendChart(daily) {
+  const ctx    = document.getElementById('trendChart').getContext('2d');
+  const labels = daily.map(d => d.date.slice(5));
+  const beArr  = daily.map(() => BREAK_EVEN);
+  if (trendChart) trendChart.destroy();
+  trendChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets: [
+      { label:'Moneyline', data: daily.map(d=>d.ml_pct), borderColor:'#3b82f6', backgroundColor:'rgba(59,130,246,.08)', borderWidth:2.5, pointRadius:4, tension:.3, fill:true },
+      { label:'Run Line',  data: daily.map(d=>d.rl_pct), borderColor:'#10b981', backgroundColor:'rgba(16,185,129,.08)', borderWidth:2.5, pointRadius:4, tension:.3, fill:true },
+      { label:'O/U',       data: daily.map(d=>d.ou_pct), borderColor:'#f59e0b', backgroundColor:'rgba(245,158,11,.08)',  borderWidth:2.5, pointRadius:4, tension:.3, fill:true },
+      { label:'Break-even',data: beArr,                  borderColor:'#94a3b8', borderWidth:1.5, borderDash:[6,4], pointRadius:0, fill:false },
+    ]},
+    options: {
+      responsive:true, maintainAspectRatio:true,
+      plugins: {
+        legend: { position:'bottom', labels:{ boxWidth:12, font:{size:11} } },
+        tooltip: { callbacks:{ label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)}%` } }
+      },
+      scales: {
+        y: { min:0, max:100, ticks:{ callback:v=>v+'%', font:{size:11} }, grid:{color:'#f1f5f9'} },
+        x: { ticks:{ font:{size:11} }, grid:{display:false} }
+      }
+    }
+  });
+}
+
+function buildBarChart(totals) {
+  const ctx = document.getElementById('barChart').getContext('2d');
+  if (barChart) barChart.destroy();
+  barChart = new Chart(ctx, {
+    type:'bar',
+    data: {
+      labels:['Moneyline','Run Line','O/U'],
+      datasets:[
+        { label:'Wins',   data:[totals.ml.wins, totals.rl.wins, totals.ou.wins],                                          backgroundColor:'#10b981' },
+        { label:'Losses', data:[totals.ml.total-totals.ml.wins, totals.rl.total-totals.rl.wins, totals.ou.total-totals.ou.wins], backgroundColor:'#f87171' },
+      ]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:true,
+      plugins:{ legend:{ position:'bottom', labels:{ boxWidth:12, font:{size:11} } } },
+      scales:{
+        x:{ stacked:true, grid:{display:false}, ticks:{font:{size:11}} },
+        y:{ stacked:true, ticks:{font:{size:11}}, grid:{color:'#f1f5f9'} }
+      }
+    }
+  });
+}
+
+function buildScatterChart(scatter) {
+  const ctx = document.getElementById('scatterChart').getContext('2d');
+  if (scatterChart) scatterChart.destroy();
+  const pts = scatter.filter(s=>s.pred&&s.actual!==null).map(s=>({ x:s.pred, y:s.actual, label:s.matchup, correct:s.ou_correct }));
+  if (!pts.length) return;
+  const maxVal = Math.max(...pts.map(p=>Math.max(p.x,p.y)), 14);
+  const minVal = Math.min(...pts.map(p=>Math.min(p.x,p.y)), 4);
+  scatterChart = new Chart(ctx, {
+    type:'scatter',
+    data:{ datasets:[
+      { label:'Games', data:pts, backgroundColor:pts.map(p=>p.correct===true?'rgba(16,185,129,.7)':p.correct===false?'rgba(248,113,113,.7)':'rgba(148,163,184,.5)'), pointRadius:6, pointHoverRadius:8 },
+      { label:'Perfect line', data:[{x:minVal,y:minVal},{x:maxVal,y:maxVal}], type:'line', borderColor:'#94a3b8', borderWidth:1.5, borderDash:[5,5], pointRadius:0, fill:false },
+    ]},
+    options:{
+      responsive:true, maintainAspectRatio:true,
+      plugins:{
+        legend:{ position:'bottom', labels:{ boxWidth:12, font:{size:11}, filter: item=>item.text!=='Games' } },
+        tooltip:{ callbacks:{ label: ctx=>{ const p=ctx.raw; return p.label?` ${p.label}: pred ${p.x} → actual ${p.y}`:` pred ${p.x} → actual ${p.y}`; } } }
+      },
+      scales:{
+        x:{ title:{display:true,text:'Predicted total runs',font:{size:11}}, ticks:{font:{size:11}}, grid:{color:'#f1f5f9'} },
+        y:{ title:{display:true,text:'Actual total runs',   font:{size:11}}, ticks:{font:{size:11}}, grid:{color:'#f1f5f9'} }
+      }
+    }
+  });
+}
+
+// ── Apply filter & re-render ──────────────────────────────────────────────────
+function applyFilter(filter) {
+  activeFilter = filter;
+  const { daily, picks, scatter } = ALL_DATA;
+
+  const filteredDaily  = filterDaily(daily,  filter);
+  const filteredPicks  = filterPicks(picks,  filter);
+  const totals         = aggregateTotals(filteredDaily);
+
+  // Update filter summary
+  const nDays = filteredDaily.length;
+  const label = filter==='all' ? `All ${nDays} days` : `${nDays} day${nDays!==1?'s':''} matched`;
+  document.getElementById('filter-summary').textContent = label;
+
+  // Update cards
+  document.getElementById('cards').innerHTML = renderCards(totals);
+
+  // Rebuild charts
+  buildTrendChart(filteredDaily);
+  buildBarChart(totals);
+  buildScatterChart(scatter); // scatter always uses all data
+
+  // Update table
+  document.getElementById('picks-table').innerHTML = renderTable(filteredPicks);
+
+  // Update active button
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.filter === filter);
+  });
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function load() {
+  try {
+    const res  = await fetch('/api/stats');
+    const data = await res.json();
+    if (!data.ok) throw new Error('API error');
+    ALL_DATA = data;
+
+    document.getElementById('content').innerHTML = `
+      <div class="card-grid" id="cards"></div>
+
+      <div class="section-title">Win rate by day</div>
+      <div class="chart-grid">
+        <div class="chart-box full">
+          <h3>Daily win % trend</h3>
+          <canvas id="trendChart" height="90"></canvas>
+        </div>
+      </div>
+
+      <div class="chart-grid">
+        <div class="chart-box">
+          <h3>Season record</h3>
+          <canvas id="barChart" height="180"></canvas>
+        </div>
+        <div class="chart-box">
+          <h3>Predicted vs actual total runs</h3>
+          <canvas id="scatterChart" height="180"></canvas>
+        </div>
+      </div>
+
+      <div class="section-title">Recent picks</div>
+      <div id="picks-table"></div>
+    `;
+
+    // Show filter bar
+    document.getElementById('filter-bar').style.display = 'flex';
+
+    // Wire up filter buttons
+    document.querySelectorAll('.filter-btn').forEach(btn => {
+      btn.addEventListener('click', () => applyFilter(btn.dataset.filter));
+    });
+
+    // Initial render with 'all'
+    applyFilter('all');
+
+  } catch(err) {
+    document.getElementById('content').innerHTML = '<div class="loading">Failed to load stats. Try refreshing.</div>';
+    console.error(err);
+  }
+}
+
+load();
+</script>
+{% endblock %}
