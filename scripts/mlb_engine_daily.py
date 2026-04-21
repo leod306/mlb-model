@@ -38,7 +38,7 @@ FEATURES_TABLE     = os.getenv("MLB_FEATURES_TABLE",    "game_features")
 DEFAULT_MODEL_PATH = PROJECT_ROOT / "ml" / "mlb_model.pkl"
 MODEL_PATH         = Path(os.getenv("MLB_MODEL_PATH", str(DEFAULT_MODEL_PATH)))
 
-BLEND_CUTOFF_GAMES = 10
+BLEND_CUTOFF_GAMES = 30   # games until 100% current season data
 ROLLING_WINDOW     = 10
 DEFAULT_TOTAL_LINE = float(os.getenv("DEFAULT_TOTAL_LINE", "8.5"))
 
@@ -323,6 +323,11 @@ def build_team_game_log(completed_games: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_prior_baselines(team_games: pd.DataFrame) -> Dict[str, Dict[str, float]]:
+    """
+    Build historical baselines with tapered season weights:
+    2026 (current) → 60%, 2025 → 30%, 2024 → 10%
+    Falls back gracefully if seasons are missing.
+    """
     if team_games.empty:
         return {"_LEAGUE_DEFAULT_": {"runs_scored":4.5,"runs_allowed":4.5,"run_diff":0.0,"home_win_pct":0.5,"away_win_pct":0.5}}
 
@@ -345,14 +350,30 @@ def build_prior_baselines(team_games: pd.DataFrame) -> Dict[str, Dict[str, float
         t = season_team[season_team["team"] == team]
         s = side_team[side_team["team"] == team]
 
-        def gwp(season, side, fallback):
-            r = s[(s["season"]==season)&(s["side"]==side)]
+        def gwp(ssn, side, fallback):
+            r = s[(s["season"]==ssn)&(s["side"]==side)]
             return fallback if r.empty else coerce_float(r.iloc[0]["win_pct"], fallback)
 
+        r26 = t[t["season"]==2026]
         r25 = t[t["season"]==2025]
         r24 = t[t["season"]==2024]
 
-        if not r25.empty and not r24.empty:
+        # Taper weights: current season matters most, older seasons fade out
+        # 2026 = 60%, 2025 = 30%, 2024 = 10%
+        if not r26.empty and not r25.empty and not r24.empty:
+            rs  = 0.6*float(r26.iloc[0]["runs_scored"])  + 0.3*float(r25.iloc[0]["runs_scored"])  + 0.1*float(r24.iloc[0]["runs_scored"])
+            ra  = 0.6*float(r26.iloc[0]["runs_allowed"]) + 0.3*float(r25.iloc[0]["runs_allowed"]) + 0.1*float(r24.iloc[0]["runs_allowed"])
+            hwp = 0.6*gwp(2026,"home",league_hwp) + 0.3*gwp(2025,"home",league_hwp) + 0.1*gwp(2024,"home",league_hwp)
+            awp = 0.6*gwp(2026,"away",league_awp) + 0.3*gwp(2025,"away",league_awp) + 0.1*gwp(2024,"away",league_awp)
+        elif not r26.empty and not r25.empty:
+            rs  = 0.7*float(r26.iloc[0]["runs_scored"])  + 0.3*float(r25.iloc[0]["runs_scored"])
+            ra  = 0.7*float(r26.iloc[0]["runs_allowed"]) + 0.3*float(r25.iloc[0]["runs_allowed"])
+            hwp = 0.7*gwp(2026,"home",league_hwp) + 0.3*gwp(2025,"home",league_hwp)
+            awp = 0.7*gwp(2026,"away",league_awp) + 0.3*gwp(2025,"away",league_awp)
+        elif not r26.empty:
+            rs, ra = float(r26.iloc[0]["runs_scored"]), float(r26.iloc[0]["runs_allowed"])
+            hwp, awp = gwp(2026,"home",league_hwp), gwp(2026,"away",league_awp)
+        elif not r25.empty and not r24.empty:
             rs  = 0.7*float(r25.iloc[0]["runs_scored"])  + 0.3*float(r24.iloc[0]["runs_scored"])
             ra  = 0.7*float(r25.iloc[0]["runs_allowed"]) + 0.3*float(r24.iloc[0]["runs_allowed"])
             hwp = 0.7*gwp(2025,"home",league_hwp) + 0.3*gwp(2024,"home",league_hwp)
@@ -368,20 +389,26 @@ def build_prior_baselines(team_games: pd.DataFrame) -> Dict[str, Dict[str, float
 
         baselines[team] = {"runs_scored":rs,"runs_allowed":ra,"run_diff":rs-ra,"home_win_pct":hwp,"away_win_pct":awp}
 
-    baselines["_LEAGUE_DEFAULT_"] = {"runs_scored":league_rs,"runs_allowed":league_ra,"run_diff":league_rd,"home_win_pct":league_hwp,"away_win_pct":league_awp}
+    baselines["_LEAGUE_DEFAULT_"] = {
+        "runs_scored":league_rs,"runs_allowed":league_ra,"run_diff":league_rd,
+        "home_win_pct":league_hwp,"away_win_pct":league_awp
+    }
     return baselines
 
 
-def get_team_blended_form(team_games, baselines, team, target_date, side, current_season=2026, blend_cutoff_games=30,
-                          rolling_window=10):
+def get_team_blended_form(team_games, baselines, team, target_date, side,
+                          current_season=2026, blend_cutoff_games=30, rolling_window=10):
     """
-    Smoothly transitions from historical baselines to current 2026 data.
+    Smoothly transitions from historical baselines to current 2026 data
+    using a square root curve so it ramps up quickly early in the season.
 
-    Weight schedule:
-      0 games  played → 100% historical (2025/2024 blend)
-      10 games played → 67% current, 33% historical
-      20 games played → 83% current, 17% historical
-      30+ games played → 100% current 2026 data
+    Weight schedule (blend_cutoff_games=30):
+      0  games → 0%  current, 100% historical
+      5  games → 41% current,  59% historical
+      10 games → 58% current,  42% historical
+      15 games → 71% current,  29% historical
+      20 games → 82% current,  18% historical
+      30 games → 100% current,  0% historical
     """
     default_base = baselines.get(team, baselines.get("_LEAGUE_DEFAULT_", {
         "runs_scored": 4.5, "runs_allowed": 4.5, "run_diff": 0.0,
@@ -393,36 +420,34 @@ def get_team_blended_form(team_games, baselines, team, target_date, side, curren
         (team_games["team"] == team) &
         (team_games["season"] == current_season) &
         (team_games["official_date"] < target_date)
-        ].sort_values("official_date")
+    ].sort_values("official_date")
 
     games_played = len(team_hist)
 
     if games_played == 0:
         return {
-            "runs_scored": float(default_base["runs_scored"]),
+            "runs_scored":  float(default_base["runs_scored"]),
             "runs_allowed": float(default_base["runs_allowed"]),
-            "run_diff": float(default_base["run_diff"]),
+            "run_diff":     float(default_base["run_diff"]),
             "side_win_pct": base_side_wp,
             "games_played": 0.0,
         }
 
-    # Rolling window for current season stats
-    recent = team_hist.tail(rolling_window)
-    current_rs = float(recent["runs_scored"].mean())
-    current_ra = float(recent["runs_allowed"].mean())
-    current_rd = float(recent["run_diff"].mean())
-    side_hist = team_hist[team_hist["side"] == side]
+    recent          = team_hist.tail(rolling_window)
+    current_rs      = float(recent["runs_scored"].mean())
+    current_ra      = float(recent["runs_allowed"].mean())
+    current_rd      = float(recent["run_diff"].mean())
+    side_hist       = team_hist[team_hist["side"] == side]
     current_side_wp = coerce_float(side_hist["win"].mean(), base_side_wp) or base_side_wp
 
-    # Smooth weight — fully transitions to current data at blend_cutoff_games
-    # Uses square root so it ramps up quickly early then levels off
+    # Square root weight — ramps up quickly, tapers historical data smoothly
     w = min(math.sqrt(games_played / float(blend_cutoff_games)), 1.0)
 
     return {
-        "runs_scored": w * current_rs + (1 - w) * float(default_base["runs_scored"]),
-        "runs_allowed": w * current_ra + (1 - w) * float(default_base["runs_allowed"]),
-        "run_diff": w * current_rd + (1 - w) * float(default_base["run_diff"]),
-        "side_win_pct": w * current_side_wp + (1 - w) * base_side_wp,
+        "runs_scored":  w * current_rs       + (1 - w) * float(default_base["runs_scored"]),
+        "runs_allowed": w * current_ra       + (1 - w) * float(default_base["runs_allowed"]),
+        "run_diff":     w * current_rd       + (1 - w) * float(default_base["run_diff"]),
+        "side_win_pct": w * current_side_wp  + (1 - w) * base_side_wp,
         "games_played": float(games_played),
     }
 
@@ -501,13 +526,11 @@ def load_model_bundle() -> Dict[str, Any]:
 
 
 def predict_ml_ensemble(models, X):
-    """25-75 percentile CI — tighter than 5-95, gives more actionable picks."""
     preds = np.column_stack([m.predict_proba(X)[:, 1] for m in models])
     return preds.mean(axis=1), np.percentile(preds,25,axis=1), np.percentile(preds,75,axis=1), preds.std(axis=1)
 
 
 def predict_regression_ensemble(models, X):
-    """25-75 percentile CI — tighter than 5-95, gives more actionable picks."""
     preds = np.column_stack([m.predict(X) for m in models])
     return preds.mean(axis=1), np.percentile(preds,25,axis=1), np.percentile(preds,75,axis=1), preds.std(axis=1)
 
@@ -529,7 +552,6 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
 
     merged = games_df.merge(probables_df, on="game_pk", how="left") if not probables_df.empty else games_df.assign(away_sp_name=None, home_sp_name=None)
 
-    # Load game_features (wRC+, FIP, bullpen, park, weather)
     gf_df = load_game_features(merged["game_pk"].tolist())
     if not gf_df.empty:
         merged = merged.merge(gf_df, on="game_pk", how="left")
@@ -552,20 +574,19 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         home_p = get_pitcher_stats(home_sp_name, pitcher_map, league_pitcher_defaults)
         away_p = get_pitcher_stats(away_sp_name, pitcher_map, league_pitcher_defaults)
 
-        home_sp_rest  = float(get_sp_rest_days(pgl_df, home_sp_name, target_date))
-        away_sp_rest  = float(get_sp_rest_days(pgl_df, away_sp_name, target_date))
-        home_bp_ip    = float(get_bullpen_ip_4d(pgl_df, home_team, target_date))
-        away_bp_ip    = float(get_bullpen_ip_4d(pgl_df, away_team, target_date))
-        home_win_pct  = float(home_form["side_win_pct"])
-        away_win_pct  = float(away_form["side_win_pct"])
-        home_rs       = float(home_form["runs_scored"])
-        away_rs       = float(away_form["runs_scored"])
-        home_ra       = float(home_form["runs_allowed"])
-        away_ra       = float(away_form["runs_allowed"])
-        home_rd       = float(home_form["run_diff"])
-        away_rd       = float(away_form["run_diff"])
+        home_sp_rest = float(get_sp_rest_days(pgl_df, home_sp_name, target_date))
+        away_sp_rest = float(get_sp_rest_days(pgl_df, away_sp_name, target_date))
+        home_bp_ip   = float(get_bullpen_ip_4d(pgl_df, home_team, target_date))
+        away_bp_ip   = float(get_bullpen_ip_4d(pgl_df, away_team, target_date))
+        home_win_pct = float(home_form["side_win_pct"])
+        away_win_pct = float(away_form["side_win_pct"])
+        home_rs      = float(home_form["runs_scored"])
+        away_rs      = float(away_form["runs_scored"])
+        home_ra      = float(home_form["runs_allowed"])
+        away_ra      = float(away_form["runs_allowed"])
+        home_rd      = float(home_form["run_diff"])
+        away_rd      = float(away_form["run_diff"])
 
-        # game_features values
         home_wrc    = coerce_float(row.get("home_wrc_plus"),    100.0) or 100.0
         away_wrc    = coerce_float(row.get("away_wrc_plus"),    100.0) or 100.0
         sp_fip_diff = coerce_float(row.get("sp_fip_diff"),      0.0)   or 0.0
@@ -576,48 +597,42 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         wind_mph    = coerce_float(row.get("wind_speed_mph"),   7.0)   or 7.0
 
         rows.append({
-            "game_pk":         int(row["game_pk"]),
-            "official_date":   target_date,
-            "away_team":       away_team,
-            "home_team":       home_team,
-            "away_team_id":    row.get("away_team_id"),
-            "home_team_id":    row.get("home_team_id"),
-            "away_sp_name":    away_sp_name,
-            "home_sp_name":    home_sp_name,
-            # Pitcher quality
-            "era_diff":        float(home_p["era"]  - away_p["era"]),
-            "whip_diff":       float(home_p["whip"] - away_p["whip"]),
-            # Rest + bullpen
-            "home_sp_rest_days":  home_sp_rest,
-            "away_sp_rest_days":  away_sp_rest,
-            "home_bullpen_ip_4d": home_bp_ip,
-            "away_bullpen_ip_4d": away_bp_ip,
-            # Win% splits
-            "home_win_pct_home": home_win_pct,
-            "away_win_pct_away": away_win_pct,
-            # Rolling team form
+            "game_pk":                  int(row["game_pk"]),
+            "official_date":            target_date,
+            "away_team":                away_team,
+            "home_team":                home_team,
+            "away_team_id":             row.get("away_team_id"),
+            "home_team_id":             row.get("home_team_id"),
+            "away_sp_name":             away_sp_name,
+            "home_sp_name":             home_sp_name,
+            "era_diff":                 float(home_p["era"]  - away_p["era"]),
+            "whip_diff":                float(home_p["whip"] - away_p["whip"]),
+            "home_sp_rest_days":        home_sp_rest,
+            "away_sp_rest_days":        away_sp_rest,
+            "home_bullpen_ip_4d":       home_bp_ip,
+            "away_bullpen_ip_4d":       away_bp_ip,
+            "home_win_pct_home":        home_win_pct,
+            "away_win_pct_away":        away_win_pct,
             "home_last10_runs_scored":  home_rs,
             "away_last10_runs_scored":  away_rs,
             "home_last10_runs_allowed": home_ra,
             "away_last10_runs_allowed": away_ra,
             "home_last10_run_diff":     home_rd,
             "away_last10_run_diff":     away_rd,
-            # game_features
-            "sp_fip_diff":      sp_fip_diff,
-            "offense_wrc_diff": wrc_diff,
-            "home_wrc_plus":    home_wrc,
-            "away_wrc_plus":    away_wrc,
-            "bullpen_fip_diff": bp_fip_diff,
-            "park_run_factor":  park_rf,
-            "temperature_f":    temp_f,
-            "wind_speed_mph":   wind_mph,
-            # Differential features — reduce home/away symmetry
-            "run_diff_form_diff":  home_rd    - away_rd,
-            "runs_scored_diff":    home_rs    - away_rs,
-            "runs_allowed_diff":   home_ra    - away_ra,
-            "sp_rest_diff":        home_sp_rest - away_sp_rest,
-            "bullpen_usage_diff":  home_bp_ip   - away_bp_ip,
-            "win_pct_diff":        home_win_pct - away_win_pct,
+            "sp_fip_diff":              sp_fip_diff,
+            "offense_wrc_diff":         wrc_diff,
+            "home_wrc_plus":            home_wrc,
+            "away_wrc_plus":            away_wrc,
+            "bullpen_fip_diff":         bp_fip_diff,
+            "park_run_factor":          park_rf,
+            "temperature_f":            temp_f,
+            "wind_speed_mph":           wind_mph,
+            "run_diff_form_diff":       home_rd    - away_rd,
+            "runs_scored_diff":         home_rs    - away_rs,
+            "runs_allowed_diff":        home_ra    - away_ra,
+            "sp_rest_diff":             home_sp_rest - away_sp_rest,
+            "bullpen_usage_diff":       home_bp_ip   - away_bp_ip,
+            "win_pct_diff":             home_win_pct - away_win_pct,
         })
 
     features_df = pd.DataFrame(rows)
@@ -653,38 +668,44 @@ def build_pick_columns(df: pd.DataFrame) -> pd.DataFrame:
         return "PASS"
 
     def get_rl(r, ml):
-        rd = coerce_float(r.get("run_diff_pred"))
-        home_prob = coerce_float(r.get("home_win_prob"))
+        """
+        Run line logic:
+        1. If ML picked the Vegas underdog → take underdog +1.5 (safer version of same bet)
+        2. If model mean favors the underdog (>40% chance) → take underdog +1.5
+        3. If ML picked the favorite AND run diff > 1.5 → take favorite -1.5
+        4. Otherwise PASS
+        Vegas defines favorite/underdog. Falls back to model prob if no Vegas line.
+        """
+        rd             = coerce_float(r.get("run_diff_pred"))
+        home_prob      = coerce_float(r.get("home_win_prob"))
         market_home_ml = coerce_float(r.get("market_home_ml"))
         market_away_ml = coerce_float(r.get("market_away_ml"))
-        home = r["home_team"]
-        away = r["away_team"]
+        home           = r["home_team"]
+        away           = r["away_team"]
         if rd is None: return "PASS"
 
         # Determine favorite/underdog from Vegas odds
-        # Positive moneyline = underdog, Negative = favorite
+        # Positive ML = underdog, Negative ML = favorite
         if market_home_ml is not None and market_away_ml is not None:
-            # Vegas says who the underdog is
             vegas_underdog = away if market_away_ml > 0 else home
             vegas_favorite = home if market_away_ml > 0 else away
         elif home_prob is not None:
-            # Fall back to model probability if no Vegas line
             vegas_underdog = away if home_prob >= 0.5 else home
             vegas_favorite = home if home_prob >= 0.5 else away
         else:
             return "PASS"
 
-        # ML likes the Vegas underdog → take underdog +1.5 (great value)
+        # Rule 1: ML picked the underdog → underdog +1.5 is free value
         if ml and ml not in ("PASS", "") and ml == vegas_underdog:
             return f"{vegas_underdog} +1.5"
 
-        # No ML pick but model mean still favors underdog → +1.5
+        # Rule 2: Mean prob says underdog has real chance → take +1.5
         if home_prob is not None:
             underdog_prob = (1 - home_prob) if vegas_underdog == away else home_prob
             if underdog_prob >= 0.40:
                 return f"{vegas_underdog} +1.5"
 
-        # ML likes the favorite AND strong run diff → favorite -1.5
+        # Rule 3: ML likes the favorite AND model is confident → favorite -1.5
         if ml and ml not in ("PASS", "") and ml == vegas_favorite and rd > 1.5:
             return f"{vegas_favorite} -1.5"
 
@@ -698,10 +719,12 @@ def build_pick_columns(df: pd.DataFrame) -> pd.DataFrame:
         if hi < DEFAULT_TOTAL_LINE: return "UNDER"
         return "PASS"
 
+    # ML must be computed first so RL can use it
     df["ml_pick"]      = df.apply(get_ml, axis=1)
     df["runline_pick"] = df.apply(lambda r: get_rl(r, r["ml_pick"]), axis=1)
     df["ou_pick"]      = df.apply(get_ou, axis=1)
     return df
+
 
 def build_top_plays(df, total_line=DEFAULT_TOTAL_LINE):
     rows = []
@@ -839,7 +862,7 @@ def main() -> None:
 
     home_prob, home_lo, home_hi, home_std = predict_ml_ensemble(bundle["win_models"], X)
     run_pred,  run_lo,  run_hi,  run_std  = predict_regression_ensemble(bundle["run_models"], X)
-    total_pred,total_lo,total_hi,total_std= predict_regression_ensemble(bundle["total_models"], X)
+    total_pred,total_lo,total_hi,total_std = predict_regression_ensemble(bundle["total_models"], X)
 
     out = features_df.copy()
     out["home_win_prob"]     = home_prob
@@ -861,10 +884,10 @@ def main() -> None:
     out = build_pick_columns(out)
 
     top_plays = build_top_plays(out)
-    out["play_rank"]  = None
-    out["play_type"]  = None
-    out["play_score"] = None
-    out["play_detail"]= None
+    out["play_rank"]   = None
+    out["play_type"]   = None
+    out["play_score"]  = None
+    out["play_detail"] = None
 
     if top_plays.empty:
         log("Top plays: none qualified")
