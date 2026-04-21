@@ -372,36 +372,57 @@ def build_prior_baselines(team_games: pd.DataFrame) -> Dict[str, Dict[str, float
     return baselines
 
 
-def get_team_blended_form(team_games, baselines, team, target_date, side, current_season=2026, blend_cutoff_games=10, rolling_window=10):
-    default_base = baselines.get(team, baselines.get("_LEAGUE_DEFAULT_", {"runs_scored":4.5,"runs_allowed":4.5,"run_diff":0.0,"home_win_pct":0.5,"away_win_pct":0.5}))
-    base_side_wp = float(default_base["home_win_pct"] if side=="home" else default_base["away_win_pct"])
+def get_team_blended_form(team_games, baselines, team, target_date, side, current_season=2026, blend_cutoff_games=30,
+                          rolling_window=10):
+    """
+    Smoothly transitions from historical baselines to current 2026 data.
+
+    Weight schedule:
+      0 games  played → 100% historical (2025/2024 blend)
+      10 games played → 67% current, 33% historical
+      20 games played → 83% current, 17% historical
+      30+ games played → 100% current 2026 data
+    """
+    default_base = baselines.get(team, baselines.get("_LEAGUE_DEFAULT_", {
+        "runs_scored": 4.5, "runs_allowed": 4.5, "run_diff": 0.0,
+        "home_win_pct": 0.5, "away_win_pct": 0.5
+    }))
+    base_side_wp = float(default_base["home_win_pct"] if side == "home" else default_base["away_win_pct"])
 
     team_hist = team_games[
-        (team_games["team"]==team) &
-        (team_games["season"]==current_season) &
+        (team_games["team"] == team) &
+        (team_games["season"] == current_season) &
         (team_games["official_date"] < target_date)
-    ].sort_values("official_date")
+        ].sort_values("official_date")
 
     games_played = len(team_hist)
-    if games_played == 0:
-        return {"runs_scored":float(default_base["runs_scored"]),"runs_allowed":float(default_base["runs_allowed"]),"run_diff":float(default_base["run_diff"]),"side_win_pct":base_side_wp,"games_played":0.0}
 
-    recent         = team_hist.tail(rolling_window)
-    current_rs     = float(recent["runs_scored"].mean())
-    current_ra     = float(recent["runs_allowed"].mean())
-    current_rd     = float(recent["run_diff"].mean())
-    side_hist      = team_hist[team_hist["side"]==side]
+    if games_played == 0:
+        return {
+            "runs_scored": float(default_base["runs_scored"]),
+            "runs_allowed": float(default_base["runs_allowed"]),
+            "run_diff": float(default_base["run_diff"]),
+            "side_win_pct": base_side_wp,
+            "games_played": 0.0,
+        }
+
+    # Rolling window for current season stats
+    recent = team_hist.tail(rolling_window)
+    current_rs = float(recent["runs_scored"].mean())
+    current_ra = float(recent["runs_allowed"].mean())
+    current_rd = float(recent["run_diff"].mean())
+    side_hist = team_hist[team_hist["side"] == side]
     current_side_wp = coerce_float(side_hist["win"].mean(), base_side_wp) or base_side_wp
 
-    if games_played >= blend_cutoff_games:
-        return {"runs_scored":current_rs,"runs_allowed":current_ra,"run_diff":current_rd,"side_win_pct":current_side_wp,"games_played":float(games_played)}
+    # Smooth weight — fully transitions to current data at blend_cutoff_games
+    # Uses square root so it ramps up quickly early then levels off
+    w = min(math.sqrt(games_played / float(blend_cutoff_games)), 1.0)
 
-    w = min(games_played/float(blend_cutoff_games), 1.0)
     return {
-        "runs_scored":  w*current_rs + (1-w)*float(default_base["runs_scored"]),
-        "runs_allowed": w*current_ra + (1-w)*float(default_base["runs_allowed"]),
-        "run_diff":     w*current_rd + (1-w)*float(default_base["run_diff"]),
-        "side_win_pct": w*current_side_wp + (1-w)*base_side_wp,
+        "runs_scored": w * current_rs + (1 - w) * float(default_base["runs_scored"]),
+        "runs_allowed": w * current_ra + (1 - w) * float(default_base["runs_allowed"]),
+        "run_diff": w * current_rd + (1 - w) * float(default_base["run_diff"]),
+        "side_win_pct": w * current_side_wp + (1 - w) * base_side_wp,
         "games_played": float(games_played),
     }
 
@@ -623,22 +644,53 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
 def build_pick_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    def ml_pick(r):
+    def get_ml(r):
         lo = coerce_float(r.get("home_win_prob_lo"))
         hi = coerce_float(r.get("home_win_prob_hi"))
-        if lo is None or hi is None: return None
+        if lo is None or hi is None: return "PASS"
         if lo > 0.45: return r["home_team"]
         if hi < 0.55: return r["away_team"]
         return "PASS"
 
-    def runline_pick(r):
+    def get_rl(r, ml):
         rd = coerce_float(r.get("run_diff_pred"))
+        home_prob = coerce_float(r.get("home_win_prob"))
+        market_home_ml = coerce_float(r.get("market_home_ml"))
+        market_away_ml = coerce_float(r.get("market_away_ml"))
+        home = r["home_team"]
+        away = r["away_team"]
         if rd is None: return "PASS"
-        if rd > 1.5: return f"{r['home_team']} -1.5"
-        if rd < -1.5: return f"{r['away_team']} -1.5"
-        return "PASS"  # ← change default to PASS instead of away +1.5
 
-    def ou_pick(r):
+        # Determine favorite/underdog from Vegas odds
+        # Positive moneyline = underdog, Negative = favorite
+        if market_home_ml is not None and market_away_ml is not None:
+            # Vegas says who the underdog is
+            vegas_underdog = away if market_away_ml > 0 else home
+            vegas_favorite = home if market_away_ml > 0 else away
+        elif home_prob is not None:
+            # Fall back to model probability if no Vegas line
+            vegas_underdog = away if home_prob >= 0.5 else home
+            vegas_favorite = home if home_prob >= 0.5 else away
+        else:
+            return "PASS"
+
+        # ML likes the Vegas underdog → take underdog +1.5 (great value)
+        if ml and ml not in ("PASS", "") and ml == vegas_underdog:
+            return f"{vegas_underdog} +1.5"
+
+        # No ML pick but model mean still favors underdog → +1.5
+        if home_prob is not None:
+            underdog_prob = (1 - home_prob) if vegas_underdog == away else home_prob
+            if underdog_prob >= 0.40:
+                return f"{vegas_underdog} +1.5"
+
+        # ML likes the favorite AND strong run diff → favorite -1.5
+        if ml and ml not in ("PASS", "") and ml == vegas_favorite and rd > 1.5:
+            return f"{vegas_favorite} -1.5"
+
+        return "PASS"
+
+    def get_ou(r):
         lo = coerce_float(r.get("total_runs_lo"))
         hi = coerce_float(r.get("total_runs_hi"))
         if lo is None or hi is None: return None
@@ -646,11 +698,10 @@ def build_pick_columns(df: pd.DataFrame) -> pd.DataFrame:
         if hi < DEFAULT_TOTAL_LINE: return "UNDER"
         return "PASS"
 
-    df["ml_pick"]      = df.apply(ml_pick,      axis=1)
-    df["runline_pick"] = df.apply(runline_pick,  axis=1)
-    df["ou_pick"]      = df.apply(ou_pick,       axis=1)
+    df["ml_pick"]      = df.apply(get_ml, axis=1)
+    df["runline_pick"] = df.apply(lambda r: get_rl(r, r["ml_pick"]), axis=1)
+    df["ou_pick"]      = df.apply(get_ou, axis=1)
     return df
-
 
 def build_top_plays(df, total_line=DEFAULT_TOTAL_LINE):
     rows = []

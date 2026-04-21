@@ -2,13 +2,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+# This file lives in scripts/ so parent = project root
+SCRIPTS_DIR  = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPTS_DIR.parent
 
 
 def run_step(name: str, script_name: str) -> None:
     print(f"\n=== Running: {name} ===")
     result = subprocess.run(
-        [sys.executable, script_name],
+        [sys.executable, str(SCRIPTS_DIR / script_name)],
         cwd=PROJECT_ROOT,
         text=True
     )
@@ -23,7 +25,7 @@ def main():
     run_step("Load Pitcher Game Logs", "load_pitcher_game_log.py")
     run_step("Load Lineups",           "load_lineups.py")
     run_step("Run MLB Engine",         "mlb_engine_daily.py")
-    run_step("Load Odds", "load_odds.py")
+    run_step("Load Odds",              "load_odds.py")
     run_step("Daily Picks Tracker",    "daily_picks_tracker.py")
     print("\n✅ Full update complete.")
 
