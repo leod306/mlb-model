@@ -34,13 +34,23 @@ GAMES_TABLE        = os.getenv("MLB_GAMES_TABLE",       "games")
 PROBABLES_TABLE    = os.getenv("MLB_PROBABLES_TABLE",   "game_probables")
 PREDICTIONS_TABLE  = os.getenv("MLB_PREDICTIONS_TABLE", "predictions")
 FEATURES_TABLE     = os.getenv("MLB_FEATURES_TABLE",    "game_features")
+ODDS_TABLE         = os.getenv("MLB_ODDS_TABLE",        "market_odds")
 
 DEFAULT_MODEL_PATH = PROJECT_ROOT / "ml" / "mlb_model.pkl"
 MODEL_PATH         = Path(os.getenv("MLB_MODEL_PATH", str(DEFAULT_MODEL_PATH)))
 
-BLEND_CUTOFF_GAMES = 30   # games until 100% current season data
+BLEND_CUTOFF_GAMES = 30
 ROLLING_WINDOW     = 10
+OU_WINDOW          = 20
+ATS_WINDOW         = 20
 DEFAULT_TOTAL_LINE = float(os.getenv("DEFAULT_TOTAL_LINE", "8.5"))
+
+# Batting order weights — leadoff matters most, drops toward bottom
+BATTING_ORDER_WEIGHTS = {1: 1.0, 2: 0.95, 3: 0.9, 4: 0.85, 5: 0.75,
+                         6: 0.65, 7: 0.55, 8: 0.45, 9: 0.35}
+
+# League average OPS fallback when no BvP data
+LEAGUE_AVG_OPS = 0.720
 
 
 # =============================================================================
@@ -134,6 +144,17 @@ def ensure_predictions_table() -> None:
         sp_rest_diff DOUBLE PRECISION,
         bullpen_usage_diff DOUBLE PRECISION,
         win_pct_diff DOUBLE PRECISION,
+        home_ou_over_rate DOUBLE PRECISION,
+        away_ou_over_rate DOUBLE PRECISION,
+        home_last_game_total DOUBLE PRECISION,
+        away_last_game_total DOUBLE PRECISION,
+        home_ats_cover_rate DOUBLE PRECISION,
+        away_ats_cover_rate DOUBLE PRECISION,
+        home_lineup_ops_vs_sp DOUBLE PRECISION,
+        away_lineup_ops_vs_sp DOUBLE PRECISION,
+        lineup_ops_diff DOUBLE PRECISION,
+        home_lineup_hard_hit DOUBLE PRECISION,
+        away_lineup_hard_hit DOUBLE PRECISION,
         home_win_prob DOUBLE PRECISION, away_win_prob DOUBLE PRECISION,
         home_win_prob_lo DOUBLE PRECISION, home_win_prob_hi DOUBLE PRECISION,
         home_win_prob_std DOUBLE PRECISION,
@@ -152,28 +173,39 @@ def ensure_predictions_table() -> None:
         conn.execute(text(sql))
 
     wanted = {
-        "sp_fip_diff":        "DOUBLE PRECISION",
-        "offense_wrc_diff":   "DOUBLE PRECISION",
-        "home_wrc_plus":      "DOUBLE PRECISION",
-        "away_wrc_plus":      "DOUBLE PRECISION",
-        "bullpen_fip_diff":   "DOUBLE PRECISION",
-        "park_run_factor":    "DOUBLE PRECISION",
-        "temperature_f":      "DOUBLE PRECISION",
-        "wind_speed_mph":     "DOUBLE PRECISION",
-        "run_diff_form_diff": "DOUBLE PRECISION",
-        "runs_scored_diff":   "DOUBLE PRECISION",
-        "runs_allowed_diff":  "DOUBLE PRECISION",
-        "sp_rest_diff":       "DOUBLE PRECISION",
-        "bullpen_usage_diff": "DOUBLE PRECISION",
-        "win_pct_diff":       "DOUBLE PRECISION",
-        "market_home_prob":   "DOUBLE PRECISION",
-        "market_away_prob":   "DOUBLE PRECISION",
-        "market_total_line":  "DOUBLE PRECISION",
-        "market_home_ml":     "INT",
-        "market_away_ml":     "INT",
-        "best_home_ml":       "INT",
-        "best_away_ml":       "INT",
-        "model_edge":         "DOUBLE PRECISION",
+        "sp_fip_diff":            "DOUBLE PRECISION",
+        "offense_wrc_diff":       "DOUBLE PRECISION",
+        "home_wrc_plus":          "DOUBLE PRECISION",
+        "away_wrc_plus":          "DOUBLE PRECISION",
+        "bullpen_fip_diff":       "DOUBLE PRECISION",
+        "park_run_factor":        "DOUBLE PRECISION",
+        "temperature_f":          "DOUBLE PRECISION",
+        "wind_speed_mph":         "DOUBLE PRECISION",
+        "run_diff_form_diff":     "DOUBLE PRECISION",
+        "runs_scored_diff":       "DOUBLE PRECISION",
+        "runs_allowed_diff":      "DOUBLE PRECISION",
+        "sp_rest_diff":           "DOUBLE PRECISION",
+        "bullpen_usage_diff":     "DOUBLE PRECISION",
+        "win_pct_diff":           "DOUBLE PRECISION",
+        "home_ou_over_rate":      "DOUBLE PRECISION",
+        "away_ou_over_rate":      "DOUBLE PRECISION",
+        "home_last_game_total":   "DOUBLE PRECISION",
+        "away_last_game_total":   "DOUBLE PRECISION",
+        "home_ats_cover_rate":    "DOUBLE PRECISION",
+        "away_ats_cover_rate":    "DOUBLE PRECISION",
+        "home_lineup_ops_vs_sp":  "DOUBLE PRECISION",
+        "away_lineup_ops_vs_sp":  "DOUBLE PRECISION",
+        "lineup_ops_diff":        "DOUBLE PRECISION",
+        "home_lineup_hard_hit":   "DOUBLE PRECISION",
+        "away_lineup_hard_hit":   "DOUBLE PRECISION",
+        "market_home_prob":       "DOUBLE PRECISION",
+        "market_away_prob":       "DOUBLE PRECISION",
+        "market_total_line":      "DOUBLE PRECISION",
+        "market_home_ml":         "INT",
+        "market_away_ml":         "INT",
+        "best_home_ml":           "INT",
+        "best_away_ml":           "INT",
+        "model_edge":             "DOUBLE PRECISION",
     }
     existing = set(get_table_columns(PREDICTIONS_TABLE))
     with engine.begin() as conn:
@@ -223,11 +255,12 @@ def load_upcoming_games(target_date: Optional[date] = None) -> pd.DataFrame:
 
 def load_probables() -> pd.DataFrame:
     if not table_exists(PROBABLES_TABLE):
-        return pd.DataFrame(columns=["game_pk", "away_sp_name", "home_sp_name"])
+        return pd.DataFrame(columns=["game_pk", "away_sp_name", "home_sp_name", "home_sp_id", "away_sp_id"])
     cols = set(get_table_columns(PROBABLES_TABLE))
-    if not {"game_pk", "away_sp_name", "home_sp_name"}.issubset(cols):
-        return pd.DataFrame(columns=["game_pk", "away_sp_name", "home_sp_name"])
-    return pd.read_sql(text(f"SELECT game_pk, away_sp_name, home_sp_name FROM {PROBABLES_TABLE}"), engine)
+    select_cols = ["game_pk", "away_sp_name", "home_sp_name"]
+    if "home_sp_id" in cols: select_cols.append("home_sp_id")
+    if "away_sp_id" in cols: select_cols.append("away_sp_id")
+    return pd.read_sql(text(f"SELECT {', '.join(select_cols)} FROM {PROBABLES_TABLE}"), engine)
 
 
 def load_completed_games() -> pd.DataFrame:
@@ -300,6 +333,137 @@ def load_game_features(game_pks: list) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def load_market_odds(game_pks: list) -> pd.DataFrame:
+    if not game_pks or not table_exists(ODDS_TABLE):
+        return pd.DataFrame()
+    try:
+        sql = text(f"""
+            SELECT game_pk,
+                   market_home_ml, market_away_ml,
+                   market_home_prob, market_away_prob,
+                   market_total_line
+            FROM {ODDS_TABLE}
+            WHERE game_pk = ANY(:pks)
+        """)
+        with engine.begin() as conn:
+            return pd.read_sql(sql, conn, params={"pks": game_pks})
+    except Exception as e:
+        log(f"⚠️  market_odds load failed: {e}")
+        return pd.DataFrame()
+
+
+# =============================================================================
+# LINEUP QUALITY SCORE
+# =============================================================================
+
+def load_lineups_for_games(game_pks: list) -> pd.DataFrame:
+    if not game_pks or not table_exists("lineups"):
+        return pd.DataFrame()
+    try:
+        sql = text("""
+            SELECT game_pk, team, side, batting_order, player_id, player_name
+            FROM lineups
+            WHERE game_pk = ANY(:pks)
+            ORDER BY game_pk, side, batting_order
+        """)
+        with engine.begin() as conn:
+            return pd.read_sql(sql, conn, params={"pks": game_pks})
+    except Exception as e:
+        log(f"⚠️  lineups load failed: {e}")
+        return pd.DataFrame()
+
+
+def load_bvp_for_pitchers(pitcher_ids: list) -> pd.DataFrame:
+    if not pitcher_ids or not table_exists("batter_vs_pitcher"):
+        return pd.DataFrame()
+    pitcher_ids = [p for p in pitcher_ids if p is not None]
+    if not pitcher_ids:
+        return pd.DataFrame()
+    try:
+        sql = text("""
+            SELECT batter_id, pitcher_id, avg, obp, slg, hard_hit_pct, avg_exit_velo, pa
+            FROM batter_vs_pitcher
+            WHERE pitcher_id = ANY(:pids)
+              AND pa >= 3
+        """)
+        with engine.begin() as conn:
+            return pd.read_sql(sql, conn, params={"pids": pitcher_ids})
+    except Exception as e:
+        log(f"⚠️  bvp load failed: {e}")
+        return pd.DataFrame()
+
+
+def compute_lineup_quality(
+    game_pk: int,
+    batting_side: str,
+    opposing_sp_id: Any,
+    lineups_df: pd.DataFrame,
+    bvp_df: pd.DataFrame,
+) -> Dict[str, float]:
+    """
+    Weighted OPS score for a team's lineup vs the opposing SP.
+    Leadoff weighted 1.0, drops to 0.35 at bottom of order.
+    Falls back to league average when no BvP data exists.
+    """
+    defaults = {"ops_vs_sp": LEAGUE_AVG_OPS, "hard_hit_pct": 0.35, "coverage": 0.0}
+
+    if lineups_df.empty or opposing_sp_id is None:
+        return defaults
+    try:
+        if math.isnan(float(opposing_sp_id)):
+            return defaults
+    except (TypeError, ValueError):
+        return defaults
+
+    team_lineup = lineups_df[
+        (lineups_df["game_pk"] == game_pk) &
+        (lineups_df["side"] == batting_side)
+    ].sort_values("batting_order")
+
+    if team_lineup.empty or bvp_df.empty:
+        return defaults
+
+    try:
+        pitcher_bvp = bvp_df[bvp_df["pitcher_id"] == int(opposing_sp_id)]
+    except (ValueError, TypeError):
+        return defaults
+    bvp_lookup = {row["batter_id"]: row for _, row in pitcher_bvp.iterrows()}
+
+    weighted_ops      = 0.0
+    weighted_hard_hit = 0.0
+    total_weight      = 0.0
+    batters_with_data = 0
+
+    for _, batter in team_lineup.iterrows():
+        order  = int(batter["batting_order"]) if pd.notna(batter["batting_order"]) else 9
+        weight = BATTING_ORDER_WEIGHTS.get(order, 0.3)
+        pid    = batter["player_id"]
+
+        if pid in bvp_lookup:
+            bvp = bvp_lookup[pid]
+            obp = coerce_float(bvp.get("obp"))
+            slg = coerce_float(bvp.get("slg"))
+            hh  = coerce_float(bvp.get("hard_hit_pct"))
+            if obp is not None and slg is not None:
+                weighted_ops      += (obp + slg) * weight
+                weighted_hard_hit += (hh or 0.35) * weight
+                total_weight      += weight
+                batters_with_data += 1
+        else:
+            weighted_ops      += LEAGUE_AVG_OPS * weight
+            weighted_hard_hit += 0.35 * weight
+            total_weight      += weight
+
+    if total_weight == 0:
+        return defaults
+
+    return {
+        "ops_vs_sp":    round(weighted_ops / total_weight, 4),
+        "hard_hit_pct": round(weighted_hard_hit / total_weight, 4),
+        "coverage":     round(batters_with_data / max(len(team_lineup), 1), 3),
+    }
+
+
 # =============================================================================
 # TEAM BASELINES / ROLLING FORM
 # =============================================================================
@@ -323,11 +487,7 @@ def build_team_game_log(completed_games: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_prior_baselines(team_games: pd.DataFrame) -> Dict[str, Dict[str, float]]:
-    """
-    Build historical baselines with tapered season weights:
-    2026 (current) → 60%, 2025 → 30%, 2024 → 10%
-    Falls back gracefully if seasons are missing.
-    """
+    """Tapered weights: 2026=60%, 2025=30%, 2024=10%"""
     if team_games.empty:
         return {"_LEAGUE_DEFAULT_": {"runs_scored":4.5,"runs_allowed":4.5,"run_diff":0.0,"home_win_pct":0.5,"away_win_pct":0.5}}
 
@@ -358,8 +518,6 @@ def build_prior_baselines(team_games: pd.DataFrame) -> Dict[str, Dict[str, float
         r25 = t[t["season"]==2025]
         r24 = t[t["season"]==2024]
 
-        # Taper weights: current season matters most, older seasons fade out
-        # 2026 = 60%, 2025 = 30%, 2024 = 10%
         if not r26.empty and not r25.empty and not r24.empty:
             rs  = 0.6*float(r26.iloc[0]["runs_scored"])  + 0.3*float(r25.iloc[0]["runs_scored"])  + 0.1*float(r24.iloc[0]["runs_scored"])
             ra  = 0.6*float(r26.iloc[0]["runs_allowed"]) + 0.3*float(r25.iloc[0]["runs_allowed"]) + 0.1*float(r24.iloc[0]["runs_allowed"])
@@ -398,56 +556,35 @@ def build_prior_baselines(team_games: pd.DataFrame) -> Dict[str, Dict[str, float
 
 def get_team_blended_form(team_games, baselines, team, target_date, side,
                           current_season=2026, blend_cutoff_games=30, rolling_window=10):
-    """
-    Smoothly transitions from historical baselines to current 2026 data
-    using a square root curve so it ramps up quickly early in the season.
-
-    Weight schedule (blend_cutoff_games=30):
-      0  games → 0%  current, 100% historical
-      5  games → 41% current,  59% historical
-      10 games → 58% current,  42% historical
-      15 games → 71% current,  29% historical
-      20 games → 82% current,  18% historical
-      30 games → 100% current,  0% historical
-    """
     default_base = baselines.get(team, baselines.get("_LEAGUE_DEFAULT_", {
-        "runs_scored": 4.5, "runs_allowed": 4.5, "run_diff": 0.0,
-        "home_win_pct": 0.5, "away_win_pct": 0.5
+        "runs_scored":4.5,"runs_allowed":4.5,"run_diff":0.0,
+        "home_win_pct":0.5,"away_win_pct":0.5
     }))
-    base_side_wp = float(default_base["home_win_pct"] if side == "home" else default_base["away_win_pct"])
+    base_side_wp = float(default_base["home_win_pct"] if side=="home" else default_base["away_win_pct"])
 
     team_hist = team_games[
-        (team_games["team"] == team) &
-        (team_games["season"] == current_season) &
+        (team_games["team"]==team) &
+        (team_games["season"]==current_season) &
         (team_games["official_date"] < target_date)
     ].sort_values("official_date")
 
     games_played = len(team_hist)
-
     if games_played == 0:
-        return {
-            "runs_scored":  float(default_base["runs_scored"]),
-            "runs_allowed": float(default_base["runs_allowed"]),
-            "run_diff":     float(default_base["run_diff"]),
-            "side_win_pct": base_side_wp,
-            "games_played": 0.0,
-        }
+        return {"runs_scored":float(default_base["runs_scored"]),"runs_allowed":float(default_base["runs_allowed"]),"run_diff":float(default_base["run_diff"]),"side_win_pct":base_side_wp,"games_played":0.0}
 
     recent          = team_hist.tail(rolling_window)
     current_rs      = float(recent["runs_scored"].mean())
     current_ra      = float(recent["runs_allowed"].mean())
     current_rd      = float(recent["run_diff"].mean())
-    side_hist       = team_hist[team_hist["side"] == side]
+    side_hist       = team_hist[team_hist["side"]==side]
     current_side_wp = coerce_float(side_hist["win"].mean(), base_side_wp) or base_side_wp
 
-    # Square root weight — ramps up quickly, tapers historical data smoothly
     w = min(math.sqrt(games_played / float(blend_cutoff_games)), 1.0)
-
     return {
-        "runs_scored":  w * current_rs       + (1 - w) * float(default_base["runs_scored"]),
-        "runs_allowed": w * current_ra       + (1 - w) * float(default_base["runs_allowed"]),
-        "run_diff":     w * current_rd       + (1 - w) * float(default_base["run_diff"]),
-        "side_win_pct": w * current_side_wp  + (1 - w) * base_side_wp,
+        "runs_scored":  w*current_rs      + (1-w)*float(default_base["runs_scored"]),
+        "runs_allowed": w*current_ra      + (1-w)*float(default_base["runs_allowed"]),
+        "run_diff":     w*current_rd      + (1-w)*float(default_base["run_diff"]),
+        "side_win_pct": w*current_side_wp + (1-w)*base_side_wp,
         "games_played": float(games_played),
     }
 
@@ -507,6 +644,46 @@ def get_bullpen_ip_4d(pgl_df, team, target_date):
 
 
 # =============================================================================
+# O/U TENDENCY + ATS COVER RATE
+# =============================================================================
+
+def get_ou_over_rate(team_games: pd.DataFrame, team: str, target_date, window: int = OU_WINDOW) -> float:
+    """% of team's last N games where total runs exceeded DEFAULT_TOTAL_LINE."""
+    tg = team_games[
+        (team_games["team"] == team) &
+        (team_games["official_date"] < target_date)
+    ].tail(window)
+    if len(tg) < 3:
+        return 0.5
+    total = tg["runs_scored"] + tg["runs_allowed"]
+    return float((total > DEFAULT_TOTAL_LINE).mean())
+
+
+def get_last_game_total(team_games: pd.DataFrame, team: str, target_date) -> float:
+    """Total runs in team's most recent game."""
+    tg = team_games[
+        (team_games["team"] == team) &
+        (team_games["official_date"] < target_date)
+    ].sort_values("official_date")
+    if tg.empty:
+        return DEFAULT_TOTAL_LINE
+    last = tg.iloc[-1]
+    return float(last["runs_scored"] + last["runs_allowed"])
+
+
+def get_ats_cover_rate(team_games: pd.DataFrame, team: str, target_date, window: int = ATS_WINDOW) -> float:
+    """% of team's last N games where they won by 2+ runs (covered -1.5)."""
+    tg = team_games[
+        (team_games["team"] == team) &
+        (team_games["official_date"] < target_date)
+    ].tail(window)
+    if len(tg) < 3:
+        return 0.5
+    run_diff = tg["runs_scored"] - tg["runs_allowed"]
+    return float((run_diff > 1.5).mean())
+
+
+# =============================================================================
 # MODEL
 # =============================================================================
 
@@ -550,14 +727,37 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
     pitcher_map             = latest_pitcher_stats_map(pitchers_df)
     league_pitcher_defaults = compute_league_pitcher_defaults(pitchers_df)
 
-    merged = games_df.merge(probables_df, on="game_pk", how="left") if not probables_df.empty else games_df.assign(away_sp_name=None, home_sp_name=None)
+    merged = games_df.merge(probables_df, on="game_pk", how="left") if not probables_df.empty else games_df.assign(away_sp_name=None, home_sp_name=None, home_sp_id=None, away_sp_id=None)
 
+    # game_features
     gf_df = load_game_features(merged["game_pk"].tolist())
     if not gf_df.empty:
         merged = merged.merge(gf_df, on="game_pk", how="left")
         log(f"  game_features joined: {len(gf_df)} rows")
     else:
         log("  ⚠️  game_features not available — using defaults")
+
+    # Vegas odds — loaded before engine so RL/O/U picks use correct lines
+    odds_df = load_market_odds(merged["game_pk"].tolist())
+    if not odds_df.empty:
+        merged = merged.merge(odds_df, on="game_pk", how="left")
+        log(f"  market_odds joined: {len(odds_df)} rows")
+    else:
+        log("  ⚠️  market_odds not available — using model prob + default line")
+
+    # Lineups + BvP
+    lineups_df = load_lineups_for_games(merged["game_pk"].tolist())
+    sp_ids = []
+    if "home_sp_id" in merged.columns:
+        sp_ids += merged["home_sp_id"].dropna().astype(int).tolist()
+    if "away_sp_id" in merged.columns:
+        sp_ids += merged["away_sp_id"].dropna().astype(int).tolist()
+    bvp_df = load_bvp_for_pitchers(sp_ids) if sp_ids else pd.DataFrame()
+
+    if not lineups_df.empty:
+        log(f"  lineups loaded: {len(lineups_df)} rows across {lineups_df['game_pk'].nunique()} games")
+    else:
+        log("  ⚠️  no lineups available — using league avg OPS for lineup quality")
 
     rows: List[Dict[str, Any]] = []
 
@@ -567,6 +767,8 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         away_team    = row["away_team"]
         home_sp_name = row.get("home_sp_name")
         away_sp_name = row.get("away_sp_name")
+        home_sp_id   = row.get("home_sp_id")
+        away_sp_id   = row.get("away_sp_id")
 
         home_form = get_team_blended_form(team_games, baselines, home_team, target_date, "home", MLB_SEASON, BLEND_CUTOFF_GAMES, ROLLING_WINDOW)
         away_form = get_team_blended_form(team_games, baselines, away_team, target_date, "away", MLB_SEASON, BLEND_CUTOFF_GAMES, ROLLING_WINDOW)
@@ -587,6 +789,7 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         home_rd      = float(home_form["run_diff"])
         away_rd      = float(away_form["run_diff"])
 
+        # game_features
         home_wrc    = coerce_float(row.get("home_wrc_plus"),    100.0) or 100.0
         away_wrc    = coerce_float(row.get("away_wrc_plus"),    100.0) or 100.0
         sp_fip_diff = coerce_float(row.get("sp_fip_diff"),      0.0)   or 0.0
@@ -596,8 +799,28 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         temp_f      = coerce_float(row.get("temperature_f"),    72.0)  or 72.0
         wind_mph    = coerce_float(row.get("wind_speed_mph"),   7.0)   or 7.0
 
+        # Vegas odds
+        mkt_home_ml   = coerce_float(row.get("market_home_ml"))
+        mkt_away_ml   = coerce_float(row.get("market_away_ml"))
+        mkt_home_prob = coerce_float(row.get("market_home_prob"))
+        mkt_away_prob = coerce_float(row.get("market_away_prob"))
+        mkt_total     = coerce_float(row.get("market_total_line"))
+
+        # O/U tendency + ATS cover rate
+        home_ou_rate    = get_ou_over_rate(team_games, home_team, target_date)
+        away_ou_rate    = get_ou_over_rate(team_games, away_team, target_date)
+        home_last_total = get_last_game_total(team_games, home_team, target_date)
+        away_last_total = get_last_game_total(team_games, away_team, target_date)
+        home_ats_rate   = get_ats_cover_rate(team_games, home_team, target_date)
+        away_ats_rate   = get_ats_cover_rate(team_games, away_team, target_date)
+
+        # Lineup quality — home bats vs away SP, away bats vs home SP
+        game_pk = int(row["game_pk"])
+        home_lq = compute_lineup_quality(game_pk, "home", away_sp_id, lineups_df, bvp_df)
+        away_lq = compute_lineup_quality(game_pk, "away", home_sp_id, lineups_df, bvp_df)
+
         rows.append({
-            "game_pk":                  int(row["game_pk"]),
+            "game_pk":                  game_pk,
             "official_date":            target_date,
             "away_team":                away_team,
             "home_team":                home_team,
@@ -633,6 +856,22 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
             "sp_rest_diff":             home_sp_rest - away_sp_rest,
             "bullpen_usage_diff":       home_bp_ip   - away_bp_ip,
             "win_pct_diff":             home_win_pct - away_win_pct,
+            "home_ou_over_rate":        home_ou_rate,
+            "away_ou_over_rate":        away_ou_rate,
+            "home_last_game_total":     home_last_total,
+            "away_last_game_total":     away_last_total,
+            "home_ats_cover_rate":      home_ats_rate,
+            "away_ats_cover_rate":      away_ats_rate,
+            "home_lineup_ops_vs_sp":    home_lq["ops_vs_sp"],
+            "away_lineup_ops_vs_sp":    away_lq["ops_vs_sp"],
+            "lineup_ops_diff":          home_lq["ops_vs_sp"] - away_lq["ops_vs_sp"],
+            "home_lineup_hard_hit":     home_lq["hard_hit_pct"],
+            "away_lineup_hard_hit":     away_lq["hard_hit_pct"],
+            "market_home_ml":           mkt_home_ml,
+            "market_away_ml":           mkt_away_ml,
+            "market_home_prob":         mkt_home_prob,
+            "market_away_prob":         mkt_away_prob,
+            "market_total_line":        mkt_total,
         })
 
     features_df = pd.DataFrame(rows)
@@ -640,11 +879,12 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
     log("Feature nunique:")
     preview_cols = [
         "era_diff","whip_diff",
-        "home_sp_rest_days","away_sp_rest_days","sp_rest_diff",
-        "home_bullpen_ip_4d","away_bullpen_ip_4d","bullpen_usage_diff",
         "home_win_pct_home","away_win_pct_away","win_pct_diff",
-        "home_last10_runs_scored","away_last10_runs_scored","runs_scored_diff",
         "home_last10_run_diff","away_last10_run_diff","run_diff_form_diff",
+        "home_ou_over_rate","away_ou_over_rate",
+        "home_ats_cover_rate","away_ats_cover_rate",
+        "home_lineup_ops_vs_sp","away_lineup_ops_vs_sp","lineup_ops_diff",
+        "market_home_ml","market_away_ml","market_total_line",
     ]
     if not features_df.empty:
         log(features_df[[c for c in preview_cols if c in features_df.columns]].nunique(dropna=False).to_string())
@@ -669,12 +909,10 @@ def build_pick_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     def get_rl(r, ml):
         """
-        Run line logic:
-        1. If ML picked the Vegas underdog → take underdog +1.5 (safer version of same bet)
-        2. If model mean favors the underdog (>40% chance) → take underdog +1.5
-        3. If ML picked the favorite AND run diff > 1.5 → take favorite -1.5
-        4. Otherwise PASS
-        Vegas defines favorite/underdog. Falls back to model prob if no Vegas line.
+        Uses Vegas moneylines to identify underdog/favorite correctly.
+        If ML liked the underdog → underdog +1.5.
+        If model mean favors underdog ≥40% → underdog +1.5.
+        If ML liked favorite AND run diff > 1.5 → favorite -1.5.
         """
         rd             = coerce_float(r.get("run_diff_pred"))
         home_prob      = coerce_float(r.get("home_win_prob"))
@@ -684,8 +922,6 @@ def build_pick_columns(df: pd.DataFrame) -> pd.DataFrame:
         away           = r["away_team"]
         if rd is None: return "PASS"
 
-        # Determine favorite/underdog from Vegas odds
-        # Positive ML = underdog, Negative ML = favorite
         if market_home_ml is not None and market_away_ml is not None:
             vegas_underdog = away if market_away_ml > 0 else home
             vegas_favorite = home if market_away_ml > 0 else away
@@ -695,31 +931,34 @@ def build_pick_columns(df: pd.DataFrame) -> pd.DataFrame:
         else:
             return "PASS"
 
-        # Rule 1: ML picked the underdog → underdog +1.5 is free value
         if ml and ml not in ("PASS", "") and ml == vegas_underdog:
             return f"{vegas_underdog} +1.5"
 
-        # Rule 2: Mean prob says underdog has real chance → take +1.5
         if home_prob is not None:
             underdog_prob = (1 - home_prob) if vegas_underdog == away else home_prob
             if underdog_prob >= 0.40:
                 return f"{vegas_underdog} +1.5"
 
-        # Rule 3: ML likes the favorite AND model is confident → favorite -1.5
         if ml and ml not in ("PASS", "") and ml == vegas_favorite and rd > 1.5:
             return f"{vegas_favorite} -1.5"
 
         return "PASS"
 
     def get_ou(r):
+        """
+        Uses Vegas market line when available to avoid OVER bias.
+        The model predicts ~9.4 runs avg but Vegas sets lines at 7.5-8.5,
+        so comparing against Vegas line gives much more balanced OVER/UNDER picks.
+        """
         lo = coerce_float(r.get("total_runs_lo"))
         hi = coerce_float(r.get("total_runs_hi"))
         if lo is None or hi is None: return None
-        if lo > DEFAULT_TOTAL_LINE: return "OVER"
-        if hi < DEFAULT_TOTAL_LINE: return "UNDER"
+        # Vegas line first — fixes systematic OVER bias
+        line = coerce_float(r.get("market_total_line")) or DEFAULT_TOTAL_LINE
+        if lo > line: return "OVER"
+        if hi < line: return "UNDER"
         return "PASS"
 
-    # ML must be computed first so RL can use it
     df["ml_pick"]      = df.apply(get_ml, axis=1)
     df["runline_pick"] = df.apply(lambda r: get_rl(r, r["ml_pick"]), axis=1)
     df["ou_pick"]      = df.apply(get_ou, axis=1)
@@ -739,14 +978,16 @@ def build_top_plays(df, total_line=DEFAULT_TOTAL_LINE):
         elif hi and hi < 0.5:
             rows.append({"game_pk":r["game_pk"],"bet_type":"ML","pick":away,"matchup":f"{away} @ {home}","score":0.5-hi,"model_value":1-mean if mean else None,"extra":f"Home CI: {lo:.3f} to {hi:.3f}"})
 
-        tlo   = coerce_float(r.get("total_runs_lo"))
-        thi   = coerce_float(r.get("total_runs_hi"))
-        tmean = coerce_float(r.get("total_runs_pred"))
+        tlo       = coerce_float(r.get("total_runs_lo"))
+        thi       = coerce_float(r.get("total_runs_hi"))
+        tmean     = coerce_float(r.get("total_runs_pred"))
+        # Use Vegas line for top play scoring too
+        game_line = coerce_float(r.get("market_total_line")) or total_line
 
-        if tlo and tlo > total_line:
-            rows.append({"game_pk":r["game_pk"],"bet_type":"O/U","pick":"OVER","matchup":f"{away} @ {home}","score":tlo-total_line,"model_value":tmean,"extra":f"CI: {tlo:.2f} to {thi:.2f} | line {total_line}"})
-        elif thi and thi < total_line:
-            rows.append({"game_pk":r["game_pk"],"bet_type":"O/U","pick":"UNDER","matchup":f"{away} @ {home}","score":total_line-thi,"model_value":tmean,"extra":f"CI: {tlo:.2f} to {thi:.2f} | line {total_line}"})
+        if tlo and tlo > game_line:
+            rows.append({"game_pk":r["game_pk"],"bet_type":"O/U","pick":"OVER","matchup":f"{away} @ {home}","score":tlo-game_line,"model_value":tmean,"extra":f"CI: {tlo:.2f} to {thi:.2f} | line {game_line}"})
+        elif thi and thi < game_line:
+            rows.append({"game_pk":r["game_pk"],"bet_type":"O/U","pick":"UNDER","matchup":f"{away} @ {home}","score":game_line-thi,"model_value":tmean,"extra":f"CI: {tlo:.2f} to {thi:.2f} | line {game_line}"})
 
     top = pd.DataFrame(rows)
     return top.sort_values("score", ascending=False).head(5).reset_index(drop=True) if not top.empty else top
@@ -779,6 +1020,11 @@ def upsert_predictions(pred_df: pd.DataFrame) -> None:
         "temperature_f","wind_speed_mph",
         "run_diff_form_diff","runs_scored_diff","runs_allowed_diff",
         "sp_rest_diff","bullpen_usage_diff","win_pct_diff",
+        "home_ou_over_rate","away_ou_over_rate",
+        "home_last_game_total","away_last_game_total",
+        "home_ats_cover_rate","away_ats_cover_rate",
+        "home_lineup_ops_vs_sp","away_lineup_ops_vs_sp","lineup_ops_diff",
+        "home_lineup_hard_hit","away_lineup_hard_hit",
         "home_win_prob","away_win_prob",
         "home_win_prob_lo","home_win_prob_hi","home_win_prob_std",
         "home_ml_implied","away_ml_implied",
@@ -786,6 +1032,8 @@ def upsert_predictions(pred_df: pd.DataFrame) -> None:
         "total_runs_pred","total_runs_lo","total_runs_hi","total_runs_std",
         "ml_pick","runline_pick","ou_pick",
         "play_rank","play_type","play_score","play_detail",
+        "market_home_ml","market_away_ml",
+        "market_home_prob","market_away_prob","market_total_line",
     ]
 
     cols       = [c for c in base_cols if c in pred_df.columns]
@@ -801,7 +1049,21 @@ def upsert_predictions(pred_df: pd.DataFrame) -> None:
         updated_at = NOW()
     """
 
-    records = pred_df[cols].to_dict(orient="records")
+    def clean_record(rec):
+        out = {}
+        for k, v in rec.items():
+            if isinstance(v, float) and math.isnan(v):
+                out[k] = None
+            elif k in ("market_home_ml", "market_away_ml") and v is not None:
+                try:
+                    out[k] = int(v)
+                except (TypeError, ValueError):
+                    out[k] = None
+            else:
+                out[k] = v
+        return out
+
+    records = [clean_record(r) for r in pred_df[cols].to_dict(orient="records")]
     with engine.begin() as conn:
         conn.execute(text(sql), records)
 
@@ -847,6 +1109,11 @@ def main() -> None:
         "home_last10_run_diff", "away_last10_run_diff",
         "run_diff_form_diff", "runs_scored_diff", "runs_allowed_diff",
         "sp_rest_diff", "bullpen_usage_diff", "win_pct_diff",
+        "home_ou_over_rate", "away_ou_over_rate",
+        "home_last_game_total", "away_last_game_total",
+        "home_ats_cover_rate", "away_ats_cover_rate",
+        "home_lineup_ops_vs_sp", "away_lineup_ops_vs_sp", "lineup_ops_diff",
+        "home_lineup_hard_hit", "away_lineup_hard_hit",
     ]
 
     for col in feature_cols:

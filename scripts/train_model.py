@@ -29,7 +29,7 @@ else:
 
 
 # ---------------------------------------------------------------------------
-# Compute differential features if not already in CSV
+# Compute differential features inline from CSV columns
 # ---------------------------------------------------------------------------
 
 def add_diff(df, col_a, col_b, new_col, default_a=0.0, default_b=0.0):
@@ -44,6 +44,9 @@ df = add_diff(df, "home_last10_runs_allowed","away_last10_runs_allowed","runs_al
 df = add_diff(df, "home_sp_rest_days",       "away_sp_rest_days",       "sp_rest_diff",       5.0, 5.0)
 df = add_diff(df, "home_bullpen_ip_4d",      "away_bullpen_ip_4d",      "bullpen_usage_diff",  4.0, 4.0)
 df = add_diff(df, "home_win_pct_home",       "away_win_pct_away",       "win_pct_diff",        0.5, 0.5)
+df = add_diff(df, "home_ou_over_rate",       "away_ou_over_rate",       "ou_over_rate_diff",   0.5, 0.5)
+df = add_diff(df, "home_last_game_total",    "away_last_game_total",    "last_game_total_diff",8.5, 8.5)
+df = add_diff(df, "home_ats_cover_rate",     "away_ats_cover_rate",     "ats_cover_rate_diff", 0.5, 0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -74,19 +77,33 @@ ROLLING_FEATURES = [
 ]
 
 DIFFERENTIAL_FEATURES = [
-    "run_diff_form_diff",   # home run diff trend minus away run diff trend
-    "runs_scored_diff",     # home scoring vs away scoring
-    "runs_allowed_diff",    # home pitching/defense vs away
-    "sp_rest_diff",         # rest advantage
-    "bullpen_usage_diff",   # bullpen fatigue gap
-    "win_pct_diff",         # home win% at home vs away win% on road
+    "run_diff_form_diff",
+    "runs_scored_diff",
+    "runs_allowed_diff",
+    "sp_rest_diff",
+    "bullpen_usage_diff",
+    "win_pct_diff",
+]
+
+# New features — O/U tendency, ATS cover rate, last game total
+BETTING_FEATURES = [
+    "home_ou_over_rate",       # % of home team games going OVER last 20
+    "away_ou_over_rate",       # % of away team games going OVER last 20
+    "ou_over_rate_diff",       # differential
+    "home_last_game_total",    # total runs in home team's last game
+    "away_last_game_total",    # total runs in away team's last game
+    "last_game_total_diff",    # differential
+    "home_ats_cover_rate",     # % of home team games covering -1.5 last 20
+    "away_ats_cover_rate",     # % of away team games covering -1.5 last 20
+    "ats_cover_rate_diff",     # differential
 ]
 
 FEATURES = (
     PITCHER_FEATURES +
     SITUATIONAL_FEATURES +
     ROLLING_FEATURES +
-    DIFFERENTIAL_FEATURES
+    DIFFERENTIAL_FEATURES +
+    BETTING_FEATURES
 )
 
 print(f"\nFeature set ({len(FEATURES)} features):")
@@ -120,6 +137,15 @@ defaults = {
     "sp_rest_diff":         0.0,
     "bullpen_usage_diff":   0.0,
     "win_pct_diff":         0.0,
+    "home_ou_over_rate":    0.5,
+    "away_ou_over_rate":    0.5,
+    "ou_over_rate_diff":    0.0,
+    "home_last_game_total": 8.5,
+    "away_last_game_total": 8.5,
+    "last_game_total_diff": 0.0,
+    "home_ats_cover_rate":  0.5,
+    "away_ats_cover_rate":  0.5,
+    "ats_cover_rate_diff":  0.0,
 }
 
 for col, default in defaults.items():
@@ -161,7 +187,7 @@ print(f"Training on {len(train)} games, testing on {len(test)} games\n")
 
 
 # ---------------------------------------------------------------------------
-# Ensemble helpers (unchanged)
+# Ensemble helpers
 # ---------------------------------------------------------------------------
 
 N_MODELS = 20
@@ -172,7 +198,7 @@ def bootstrap_sample(X: pd.DataFrame, y: pd.Series, seed: int):
     return X.iloc[idx], y.iloc[idx]
 
 
-def train_run_ensemble(X: pd.DataFrame, y: pd.Series, n_models: int = N_MODELS):
+def train_run_ensemble(X, y, n_models=N_MODELS):
     models = []
     for i in range(n_models):
         X_boot, y_boot = bootstrap_sample(X, y, seed=1000 + i)
@@ -186,7 +212,7 @@ def train_run_ensemble(X: pd.DataFrame, y: pd.Series, n_models: int = N_MODELS):
     return models
 
 
-def train_total_ensemble(X: pd.DataFrame, y: pd.Series, n_models: int = N_MODELS):
+def train_total_ensemble(X, y, n_models=N_MODELS):
     models = []
     for i in range(n_models):
         X_boot, y_boot = bootstrap_sample(X, y, seed=2000 + i)
@@ -200,7 +226,7 @@ def train_total_ensemble(X: pd.DataFrame, y: pd.Series, n_models: int = N_MODELS
     return models
 
 
-def train_win_ensemble(X: pd.DataFrame, y: pd.Series, n_models: int = N_MODELS):
+def train_win_ensemble(X, y, n_models=N_MODELS):
     models = []
     for i in range(n_models):
         X_boot, y_boot = bootstrap_sample(X, y, seed=3000 + i)
@@ -215,7 +241,7 @@ def train_win_ensemble(X: pd.DataFrame, y: pd.Series, n_models: int = N_MODELS):
     return models
 
 
-def ensemble_regression_predict(models, X: pd.DataFrame):
+def ensemble_regression_predict(models, X):
     preds     = np.column_stack([m.predict(X) for m in models])
     mean_pred = preds.mean(axis=1)
     p05       = np.percentile(preds, 5,  axis=1)
@@ -224,7 +250,7 @@ def ensemble_regression_predict(models, X: pd.DataFrame):
     return mean_pred, p05, p95, std
 
 
-def ensemble_classification_predict(models, X: pd.DataFrame):
+def ensemble_classification_predict(models, X):
     preds     = np.column_stack([m.predict_proba(X)[:, 1] for m in models])
     mean_pred = preds.mean(axis=1)
     p05       = np.percentile(preds, 5,  axis=1)
@@ -238,17 +264,17 @@ def ensemble_classification_predict(models, X: pd.DataFrame):
 # ---------------------------------------------------------------------------
 
 print("Training run differential ensemble...")
-run_models = train_run_ensemble(X_train, y_run_train, n_models=N_MODELS)
+run_models = train_run_ensemble(X_train, y_run_train)
 run_mean, run_lo, run_hi, run_std = ensemble_regression_predict(run_models, X_test)
 print(f"Run Diff Ensemble MAE: {round(mean_absolute_error(y_run_test, run_mean), 3)}\n")
 
 print("Training total runs ensemble...")
-total_models = train_total_ensemble(X_train, y_total_train, n_models=N_MODELS)
+total_models = train_total_ensemble(X_train, y_total_train)
 total_mean, total_lo, total_hi, total_std = ensemble_regression_predict(total_models, X_test)
 print(f"Total Runs Ensemble MAE: {round(mean_absolute_error(y_total_test, total_mean), 3)}\n")
 
 print("Training win probability ensemble...")
-win_models = train_win_ensemble(X_train, y_win_train, n_models=N_MODELS)
+win_models = train_win_ensemble(X_train, y_win_train)
 win_mean, win_lo, win_hi, win_std = ensemble_classification_predict(win_models, X_test)
 win_preds = (win_mean >= 0.5).astype(int)
 print(f"Win Ensemble Accuracy: {round(accuracy_score(y_win_test, win_preds), 4)}\n")
@@ -261,6 +287,12 @@ print(f"Win Ensemble Accuracy: {round(accuracy_score(y_win_test, win_preds), 4)}
 print("Feature importances (first win model):")
 importances = dict(zip(FEATURES, win_models[0].feature_importances_))
 for feat, imp in sorted(importances.items(), key=lambda x: -x[1]):
+    bar = "█" * int(imp * 200)
+    print(f"  {feat:<30} {imp:.4f}  {bar}")
+
+print("\nFeature importances (first total model):")
+importances_t = dict(zip(FEATURES, total_models[0].feature_importances_))
+for feat, imp in sorted(importances_t.items(), key=lambda x: -x[1]):
     bar = "█" * int(imp * 200)
     print(f"  {feat:<30} {imp:.4f}  {bar}")
 
@@ -285,7 +317,7 @@ joblib.dump(win_models,   win_models_path)
 meta = {
     "features":      FEATURES,
     "team_classes_": le.classes_.tolist(),
-    "note":          "Ensemble — pitcher + situational + rolling + differential features",
+    "note":          "Ensemble — pitcher + situational + rolling + differential + betting tendency features",
     "n_models":      N_MODELS,
 }
 joblib.dump(meta, meta_path)
@@ -304,22 +336,17 @@ print(f"  {run_models_path}")
 print(f"  {total_models_path}")
 print(f"  {win_models_path}")
 print(f"  {meta_path}")
-print(f"  {alias_path} (full ensemble bundle for engine)")
+print(f"  {alias_path}")
 
 print("\nEnsemble interval preview on test set:")
 preview = pd.DataFrame({
     "win_mean":    win_mean[:10],
     "win_lo_5":    win_lo[:10],
     "win_hi_95":   win_hi[:10],
-    "win_std":     win_std[:10],
     "total_mean":  total_mean[:10],
     "total_lo_5":  total_lo[:10],
     "total_hi_95": total_hi[:10],
-    "total_std":   total_std[:10],
     "run_mean":    run_mean[:10],
-    "run_lo_5":    run_lo[:10],
-    "run_hi_95":   run_hi[:10],
-    "run_std":     run_std[:10],
 })
 print(preview.round(3).to_string(index=False))
 
