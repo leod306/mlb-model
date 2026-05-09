@@ -19,6 +19,7 @@ Run order:
   7. Run MLB Engine         — generates predictions using all of the above
   8. Daily Picks Tracker    — evaluates yesterday + saves today's picks
 """
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -26,12 +27,16 @@ from pathlib import Path
 SCRIPTS_DIR  = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPTS_DIR.parent
 
+# Ensure app module is importable from any working directory
+ENV = {**os.environ, "PYTHONPATH": str(PROJECT_ROOT)}
+
 
 def run_step(name: str, script_name: str, required: bool = True) -> None:
     print(f"\n=== Running: {name} ===")
     result = subprocess.run(
         [sys.executable, str(SCRIPTS_DIR / script_name)],
         cwd=PROJECT_ROOT,
+        env=ENV,
         text=True,
     )
     if result.returncode != 0:

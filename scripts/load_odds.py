@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -28,53 +28,50 @@ from app.db import engine
 
 MLB_SEASON = int(os.getenv("MLB_SEASON", "2026"))
 
-GAMES_TABLE = os.getenv("MLB_GAMES_TABLE", "games")
+GAMES_TABLE       = os.getenv("MLB_GAMES_TABLE",       "games")
 PREDICTIONS_TABLE = os.getenv("MLB_PREDICTIONS_TABLE", "predictions")
-ODDS_TABLE = os.getenv("MLB_ODDS_TABLE", "market_odds")
+ODDS_TABLE        = os.getenv("MLB_ODDS_TABLE",        "market_odds")
 
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
+ODDS_API_KEY  = os.getenv("ODDS_API_KEY", "")
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
-HTTP_TIMEOUT = 20
+HTTP_TIMEOUT  = 20
 
 BOOKMAKERS = "draftkings,fanduel,betmgm,caesars"
 
 
 # =============================================================================
-# TEAM NAME MAP
+# TEAM NAME MAPS
 # =============================================================================
 
 ODDS_TEAM_MAP = {
-    "Arizona Diamondbacks": "ARI",
-    "Atlanta Braves": "ATL",
-    "Baltimore Orioles": "BAL",
-    "Boston Red Sox": "BOS",
-    "Chicago Cubs": "CHC",
-    "Chicago White Sox": "CWS",
-    "Cincinnati Reds": "CIN",
-    "Cleveland Guardians": "CLE",
-    "Colorado Rockies": "COL",
-    "Detroit Tigers": "DET",
-    "Houston Astros": "HOU",
-    "Kansas City Royals": "KC",
-    "Los Angeles Angels": "LAA",
-    "Los Angeles Dodgers": "LAD",
-    "Miami Marlins": "MIA",
-    "Milwaukee Brewers": "MIL",
-    "Minnesota Twins": "MIN",
-    "New York Mets": "NYM",
-    "New York Yankees": "NYY",
-    "Athletics": "ATH",
-    "Oakland Athletics": "ATH",
-    "Philadelphia Phillies": "PHI",
-    "Pittsburgh Pirates": "PIT",
-    "San Diego Padres": "SD",
-    "San Francisco Giants": "SF",
-    "Seattle Mariners": "SEA",
-    "St. Louis Cardinals": "STL",
-    "Tampa Bay Rays": "TB",
-    "Texas Rangers": "TEX",
-    "Toronto Blue Jays": "TOR",
+    "Arizona Diamondbacks": "ARI",  "Atlanta Braves": "ATL",
+    "Baltimore Orioles": "BAL",     "Boston Red Sox": "BOS",
+    "Chicago Cubs": "CHC",          "Chicago White Sox": "CWS",
+    "Cincinnati Reds": "CIN",       "Cleveland Guardians": "CLE",
+    "Colorado Rockies": "COL",      "Detroit Tigers": "DET",
+    "Houston Astros": "HOU",        "Kansas City Royals": "KC",
+    "Los Angeles Angels": "LAA",    "Los Angeles Dodgers": "LAD",
+    "Miami Marlins": "MIA",         "Milwaukee Brewers": "MIL",
+    "Minnesota Twins": "MIN",       "New York Mets": "NYM",
+    "New York Yankees": "NYY",      "Athletics": "ATH",
+    "Oakland Athletics": "ATH",     "Philadelphia Phillies": "PHI",
+    "Pittsburgh Pirates": "PIT",    "San Diego Padres": "SD",
+    "San Francisco Giants": "SF",   "Seattle Mariners": "SEA",
+    "St. Louis Cardinals": "STL",   "Tampa Bay Rays": "TB",
+    "Texas Rangers": "TEX",         "Toronto Blue Jays": "TOR",
     "Washington Nationals": "WSH",
+}
+
+# ESPN abbreviation → DB abbreviation
+ESPN_TEAM_MAP = {
+    "ARI": "ARI", "ATL": "ATL", "BAL": "BAL", "BOS": "BOS",
+    "CHC": "CHC", "CWS": "CWS", "CIN": "CIN", "CLE": "CLE",
+    "COL": "COL", "DET": "DET", "HOU": "HOU", "KC":  "KC",
+    "LAA": "LAA", "LAD": "LAD", "MIA": "MIA", "MIL": "MIL",
+    "MIN": "MIN", "NYM": "NYM", "NYY": "NYY", "OAK": "ATH",
+    "ATH": "ATH", "PHI": "PHI", "PIT": "PIT", "SD":  "SD",
+    "SF":  "SF",  "SEA": "SEA", "STL": "STL", "TB":  "TB",
+    "TEX": "TEX", "TOR": "TOR", "WSH": "WSH", "AZ":  "ARI",
 }
 
 
@@ -89,10 +86,8 @@ def log(msg: str) -> None:
 def table_exists(table_name: str) -> bool:
     sql = """
     SELECT EXISTS (
-        SELECT 1
-        FROM information_schema.tables
-        WHERE table_schema = 'public'
-          AND table_name = :table_name
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = :table_name
     )
     """
     with engine.begin() as conn:
@@ -101,10 +96,8 @@ def table_exists(table_name: str) -> bool:
 
 def get_table_columns(table_name: str) -> list[str]:
     sql = """
-    SELECT column_name
-    FROM information_schema.columns
-    WHERE table_schema = 'public'
-      AND table_name = :table_name
+    SELECT column_name FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = :table_name
     ORDER BY ordinal_position
     """
     with engine.begin() as conn:
@@ -148,11 +141,6 @@ def prob_to_american(prob: float) -> Optional[int]:
 
 
 def best_bettor_price(prices: list[float]) -> Optional[int]:
-    """
-    Picks the most favorable American odds for a bettor:
-    - for positive prices: bigger is better (+140 > +120)
-    - for negative prices: less negative is better (-110 > -140)
-    """
     if not prices:
         return None
     return int(max(prices))
@@ -170,46 +158,39 @@ def ensure_odds_table() -> None:
         official_date       DATE NOT NULL,
         home_team           TEXT NOT NULL,
         away_team           TEXT NOT NULL,
-
         market_home_ml      INT,
         market_away_ml      INT,
         market_home_prob    DOUBLE PRECISION,
         market_away_prob    DOUBLE PRECISION,
-
         market_total_line   DOUBLE PRECISION,
         market_ou_direction TEXT,
-
         best_home_ml        INT,
         best_away_ml        INT,
-
         bookmakers_used     INT,
         fetched_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
         PRIMARY KEY (home_team, away_team, official_date)
     );
     """
     with engine.begin() as conn:
         conn.execute(text(sql))
-        conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_{ODDS_TABLE}_date ON {ODDS_TABLE}(official_date);"))
+        conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_{ODDS_TABLE}_date   ON {ODDS_TABLE}(official_date);"))
         conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_{ODDS_TABLE}_gamepk ON {ODDS_TABLE}(game_pk);"))
 
 
 def ensure_predictions_odds_columns() -> None:
     if not table_exists(PREDICTIONS_TABLE):
         return
-
     wanted = {
-        "market_home_prob": "DOUBLE PRECISION",
-        "market_away_prob": "DOUBLE PRECISION",
+        "market_home_prob":  "DOUBLE PRECISION",
+        "market_away_prob":  "DOUBLE PRECISION",
         "market_total_line": "DOUBLE PRECISION",
-        "market_home_ml": "INT",
-        "market_away_ml": "INT",
-        "best_home_ml": "INT",
-        "best_away_ml": "INT",
-        "model_edge": "DOUBLE PRECISION",
+        "market_home_ml":    "INT",
+        "market_away_ml":    "INT",
+        "best_home_ml":      "INT",
+        "best_away_ml":      "INT",
+        "model_edge":        "DOUBLE PRECISION",
     }
-
     existing = set(get_table_columns(PREDICTIONS_TABLE))
     with engine.begin() as conn:
         for col, dtype in wanted.items():
@@ -221,26 +202,32 @@ def ensure_predictions_odds_columns() -> None:
 # TARGET SLATE
 # =============================================================================
 
-def get_target_date() -> Optional[datetime.date]:
+def get_target_date():
     if not table_exists(GAMES_TABLE):
         raise RuntimeError(f"Missing required table: {GAMES_TABLE}")
-
     sql = f"""
-    SELECT MIN(official_date) AS official_date
-    FROM {GAMES_TABLE}
-    WHERE official_date >= CURRENT_DATE
-      AND season = :season
+    SELECT MIN(official_date) FROM {GAMES_TABLE}
+    WHERE official_date >= CURRENT_DATE AND season = :season
     """
     with engine.begin() as conn:
         row = conn.execute(text(sql), {"season": MLB_SEASON}).fetchone()
+    return row[0] if row and row[0] else None
 
-    if not row or not row[0]:
-        return None
-    return row[0]
+
+def get_all_games_for_date(target_date) -> list[tuple]:
+    """Return all (home_team, away_team) for the target slate."""
+    sql = f"""
+    SELECT home_team, away_team FROM {GAMES_TABLE}
+    WHERE official_date = :d AND season = :s
+    ORDER BY game_pk
+    """
+    with engine.begin() as conn:
+        rows = conn.execute(text(sql), {"d": target_date, "s": MLB_SEASON}).fetchall()
+    return [(r[0], r[1]) for r in rows]
 
 
 # =============================================================================
-# FETCH ODDS
+# FETCH ODDS — PRIMARY (Odds API)
 # =============================================================================
 
 def fetch_market_odds(target_date) -> list[dict]:
@@ -250,12 +237,12 @@ def fetch_market_odds(target_date) -> list[dict]:
 
     url = f"{ODDS_API_BASE}/sports/baseball_mlb/odds"
     params = {
-        "apiKey": ODDS_API_KEY,
-        "regions": "us",
-        "markets": "h2h,totals",
-        "bookmakers": BOOKMAKERS,
-        "oddsFormat": "american",
-        "dateFormat": "iso",
+        "apiKey":      ODDS_API_KEY,
+        "regions":     "us",
+        "markets":     "h2h,totals",
+        "bookmakers":  BOOKMAKERS,
+        "oddsFormat":  "american",
+        "dateFormat":  "iso",
     }
 
     try:
@@ -263,7 +250,7 @@ def fetch_market_odds(target_date) -> list[dict]:
         r.raise_for_status()
         data = r.json()
         remaining = r.headers.get("x-requests-remaining", "?")
-        used = r.headers.get("x-requests-used", "?")
+        used      = r.headers.get("x-requests-used", "?")
         log(f"Odds API fetched {len(data)} games | remaining={remaining} used={used}")
     except Exception as e:
         log(f"Odds API fetch failed: {e}")
@@ -272,22 +259,27 @@ def fetch_market_odds(target_date) -> list[dict]:
     results: list[dict] = []
 
     for game in data:
-        home_team = norm_team(game.get("home_team", ""))
-        away_team = norm_team(game.get("away_team", ""))
+        home_team    = norm_team(game.get("home_team", ""))
+        away_team    = norm_team(game.get("away_team", ""))
         odds_game_id = game.get("id", "")
 
         home_ml_prices: list[float] = []
         away_ml_prices: list[float] = []
-        total_lines: list[float] = []
+        total_lines:    list[float] = []
 
-        commence = game.get("commence_time")
-        official_date = target_date
+        # Parse commence time — allow ±1 day for timezone edge cases
+        commence     = game.get("commence_time")
+        game_date    = target_date
         if commence:
             try:
-                dt = pd.to_datetime(commence, utc=True)
-                official_date = dt.date()
+                dt        = pd.to_datetime(commence, utc=True)
+                game_date = dt.date()
             except Exception:
-                official_date = target_date
+                game_date = target_date
+
+        if abs((game_date - target_date).days) > 1:
+            continue
+        game_date = target_date  # snap to target date
 
         for bookmaker in game.get("bookmakers", []):
             for market in bookmaker.get("markets", []):
@@ -295,12 +287,11 @@ def fetch_market_odds(target_date) -> list[dict]:
 
                 if key == "h2h":
                     for outcome in market.get("outcomes", []):
-                        name = norm_team(outcome.get("name", ""))
+                        name  = norm_team(outcome.get("name", ""))
                         price = outcome.get("price")
                         if price is None:
                             continue
                         price = float(price)
-
                         if name == home_team:
                             home_ml_prices.append(price)
                         elif name == away_team:
@@ -311,10 +302,6 @@ def fetch_market_odds(target_date) -> list[dict]:
                         point = outcome.get("point")
                         if point is not None:
                             total_lines.append(float(point))
-
-        # keep only games for the target slate date
-        if official_date != target_date:
-            continue
 
         if not home_ml_prices or not away_ml_prices:
             continue
@@ -328,7 +315,6 @@ def fetch_market_odds(target_date) -> list[dict]:
         avg_home_prob = sum(home_probs) / len(home_probs)
         avg_away_prob = sum(away_probs) / len(away_probs)
 
-        # vig removal normalization
         total_prob = avg_home_prob + avg_away_prob
         if total_prob > 0:
             avg_home_prob /= total_prob
@@ -347,19 +333,119 @@ def fetch_market_odds(target_date) -> list[dict]:
             avg_total = None
 
         results.append({
-            "odds_game_id": odds_game_id,
-            "official_date": official_date,
-            "home_team": home_team,
-            "away_team": away_team,
-            "market_home_ml": prob_to_american(avg_home_prob),
-            "market_away_ml": prob_to_american(avg_away_prob),
-            "market_home_prob": avg_home_prob,
-            "market_away_prob": avg_away_prob,
-            "market_total_line": avg_total,
+            "odds_game_id":       odds_game_id,
+            "official_date":      game_date,
+            "home_team":          home_team,
+            "away_team":          away_team,
+            "market_home_ml":     prob_to_american(avg_home_prob),
+            "market_away_ml":     prob_to_american(avg_away_prob),
+            "market_home_prob":   avg_home_prob,
+            "market_away_prob":   avg_away_prob,
+            "market_total_line":  avg_total,
             "market_ou_direction": None,
-            "best_home_ml": best_bettor_price(home_ml_prices),
-            "best_away_ml": best_bettor_price(away_ml_prices),
-            "bookmakers_used": len(game.get("bookmakers", [])),
+            "best_home_ml":       best_bettor_price(home_ml_prices),
+            "best_away_ml":       best_bettor_price(away_ml_prices),
+            "bookmakers_used":    len(game.get("bookmakers", [])),
+        })
+
+    return results
+
+
+# =============================================================================
+# FETCH ODDS — FALLBACK (ESPN free API)
+# =============================================================================
+
+def fetch_espn_odds(target_date, missing_games: list[tuple]) -> list[dict]:
+    """
+    Fetch O/U lines + moneylines from ESPN's free scoreboard API
+    for games that the Odds API missed.
+    missing_games: list of (home_team, away_team) tuples
+    """
+    if not missing_games:
+        return []
+
+    date_str = target_date.strftime("%Y%m%d")
+    url      = f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?dates={date_str}"
+
+    try:
+        resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log(f"  ⚠️  ESPN fetch failed: {e}")
+        return []
+
+    results = []
+    missing_set = set(missing_games)
+
+    for event in data.get("events", []):
+        competition = event.get("competitions", [{}])[0]
+        competitors = competition.get("competitors", [])
+        if len(competitors) < 2:
+            continue
+
+        home_c = next((c for c in competitors if c.get("homeAway") == "home"), None)
+        away_c = next((c for c in competitors if c.get("homeAway") == "away"), None)
+        if not home_c or not away_c:
+            continue
+
+        home_abbr = ESPN_TEAM_MAP.get(home_c.get("team", {}).get("abbreviation", ""), "")
+        away_abbr = ESPN_TEAM_MAP.get(away_c.get("team", {}).get("abbreviation", ""), "")
+
+        if not home_abbr or not away_abbr:
+            continue
+        if (home_abbr, away_abbr) not in missing_set:
+            continue
+
+        # Extract O/U and moneylines from odds block
+        odds_list = competition.get("odds", [])
+        total     = None
+        home_ml   = None
+        away_ml   = None
+
+        for o in odds_list:
+            if o.get("overUnder") and total is None:
+                try:
+                    total = float(o["overUnder"])
+                except Exception:
+                    pass
+            if o.get("homeTeamOdds", {}).get("moneyLine") and home_ml is None:
+                try:
+                    home_ml = int(o["homeTeamOdds"]["moneyLine"])
+                except Exception:
+                    pass
+            if o.get("awayTeamOdds", {}).get("moneyLine") and away_ml is None:
+                try:
+                    away_ml = int(o["awayTeamOdds"]["moneyLine"])
+                except Exception:
+                    pass
+
+        if total is None and home_ml is None:
+            continue
+
+        home_prob = american_to_prob(home_ml) if home_ml else None
+        away_prob = american_to_prob(away_ml) if away_ml else None
+        if home_prob and away_prob:
+            total_p   = home_prob + away_prob
+            home_prob = round(home_prob / total_p, 4)
+            away_prob = round(away_prob / total_p, 4)
+
+        log(f"  ESPN fill: {away_abbr} @ {home_abbr} — total={total} ml={home_ml}/{away_ml}")
+
+        results.append({
+            "odds_game_id":        f"espn_{home_abbr}_{away_abbr}",
+            "official_date":       target_date,
+            "home_team":           home_abbr,
+            "away_team":           away_abbr,
+            "market_home_ml":      home_ml,
+            "market_away_ml":      away_ml,
+            "market_home_prob":    home_prob,
+            "market_away_prob":    away_prob,
+            "market_total_line":   total,
+            "market_ou_direction": None,
+            "best_home_ml":        home_ml,
+            "best_away_ml":        away_ml,
+            "bookmakers_used":     0,
         })
 
     return results
@@ -375,62 +461,37 @@ def upsert_market_odds(odds_rows: list[dict]) -> int:
 
     sql = f"""
     INSERT INTO {ODDS_TABLE} (
-        odds_game_id,
-        official_date,
-        home_team,
-        away_team,
-        market_home_ml,
-        market_away_ml,
-        market_home_prob,
-        market_away_prob,
-        market_total_line,
-        market_ou_direction,
-        best_home_ml,
-        best_away_ml,
-        bookmakers_used,
-        fetched_at,
-        updated_at
-    )
-    VALUES (
-        :odds_game_id,
-        :official_date,
-        :home_team,
-        :away_team,
-        :market_home_ml,
-        :market_away_ml,
-        :market_home_prob,
-        :market_away_prob,
-        :market_total_line,
-        :market_ou_direction,
-        :best_home_ml,
-        :best_away_ml,
-        :bookmakers_used,
-        NOW(),
-        NOW()
+        odds_game_id, official_date, home_team, away_team,
+        market_home_ml, market_away_ml, market_home_prob, market_away_prob,
+        market_total_line, market_ou_direction, best_home_ml, best_away_ml,
+        bookmakers_used, fetched_at, updated_at
+    ) VALUES (
+        :odds_game_id, :official_date, :home_team, :away_team,
+        :market_home_ml, :market_away_ml, :market_home_prob, :market_away_prob,
+        :market_total_line, :market_ou_direction, :best_home_ml, :best_away_ml,
+        :bookmakers_used, NOW(), NOW()
     )
     ON CONFLICT (home_team, away_team, official_date) DO UPDATE SET
-        odds_game_id       = EXCLUDED.odds_game_id,
-        market_home_ml     = EXCLUDED.market_home_ml,
-        market_away_ml     = EXCLUDED.market_away_ml,
-        market_home_prob   = EXCLUDED.market_home_prob,
-        market_away_prob   = EXCLUDED.market_away_prob,
-        market_total_line  = EXCLUDED.market_total_line,
-        market_ou_direction= EXCLUDED.market_ou_direction,
-        best_home_ml       = EXCLUDED.best_home_ml,
-        best_away_ml       = EXCLUDED.best_away_ml,
-        bookmakers_used    = EXCLUDED.bookmakers_used,
-        updated_at         = NOW()
+        odds_game_id        = EXCLUDED.odds_game_id,
+        market_home_ml      = EXCLUDED.market_home_ml,
+        market_away_ml      = EXCLUDED.market_away_ml,
+        market_home_prob    = EXCLUDED.market_home_prob,
+        market_away_prob    = EXCLUDED.market_away_prob,
+        market_total_line   = COALESCE(EXCLUDED.market_total_line, {ODDS_TABLE}.market_total_line),
+        market_ou_direction = EXCLUDED.market_ou_direction,
+        best_home_ml        = COALESCE(EXCLUDED.best_home_ml, {ODDS_TABLE}.best_home_ml),
+        best_away_ml        = COALESCE(EXCLUDED.best_away_ml, {ODDS_TABLE}.best_away_ml),
+        bookmakers_used     = EXCLUDED.bookmakers_used,
+        updated_at          = NOW()
     """
     with engine.begin() as conn:
         conn.execute(text(sql), odds_rows)
-
     return len(odds_rows)
 
 
 def link_odds_to_games(target_date) -> None:
     sql = f"""
-    UPDATE {ODDS_TABLE} mo
-    SET game_pk = g.game_pk
+    UPDATE {ODDS_TABLE} mo SET game_pk = g.game_pk
     FROM {GAMES_TABLE} g
     WHERE mo.official_date = g.official_date
       AND mo.home_team = g.home_team
@@ -442,23 +503,17 @@ def link_odds_to_games(target_date) -> None:
 
 
 def update_predictions_with_odds(target_date) -> int:
-    """
-    If predictions already exist for the slate, enrich them with market odds.
-    Safe to run even if predictions are not there yet.
-    """
     if not table_exists(PREDICTIONS_TABLE):
         return 0
-
     sql = f"""
-    UPDATE {PREDICTIONS_TABLE} p
-    SET
-        market_home_prob = mo.market_home_prob,
-        market_away_prob = mo.market_away_prob,
+    UPDATE {PREDICTIONS_TABLE} p SET
+        market_home_prob  = mo.market_home_prob,
+        market_away_prob  = mo.market_away_prob,
         market_total_line = mo.market_total_line,
-        market_home_ml = mo.market_home_ml,
-        market_away_ml = mo.market_away_ml,
-        best_home_ml = mo.best_home_ml,
-        best_away_ml = mo.best_away_ml,
+        market_home_ml    = mo.market_home_ml,
+        market_away_ml    = mo.market_away_ml,
+        best_home_ml      = mo.best_home_ml,
+        best_away_ml      = mo.best_away_ml,
         model_edge = CASE
             WHEN p.home_win_prob IS NOT NULL AND mo.market_home_prob IS NOT NULL
             THEN ROUND((p.home_win_prob - mo.market_home_prob)::numeric, 4)
@@ -478,16 +533,9 @@ def update_predictions_with_odds(target_date) -> int:
 def show_preview(target_date) -> None:
     if not table_exists(ODDS_TABLE):
         return
-
     sql = f"""
-    SELECT
-        away_team,
-        home_team,
-        market_home_ml,
-        market_away_ml,
-        market_total_line,
-        best_home_ml,
-        best_away_ml
+    SELECT away_team, home_team, market_home_ml, market_away_ml,
+           market_total_line, best_home_ml, best_away_ml
     FROM {ODDS_TABLE}
     WHERE official_date = :target_date
     ORDER BY away_team, home_team
@@ -496,7 +544,6 @@ def show_preview(target_date) -> None:
     if df.empty:
         log("No odds rows saved for this slate.")
         return
-
     log("")
     log("=" * 60)
     log(f"MARKET ODDS PREVIEW FOR {target_date}")
@@ -509,9 +556,8 @@ def show_preview(target_date) -> None:
 # =============================================================================
 
 def main() -> None:
-    now_utc = datetime.now(timezone.utc)
     log("=" * 60)
-    log(f"load_odds.py | {now_utc.date()}")
+    log(f"load_odds.py | {datetime.now(timezone.utc).date()}")
     log("=" * 60)
 
     ensure_odds_table()
@@ -524,12 +570,29 @@ def main() -> None:
 
     log(f"Target slate date: {target_date}")
 
+    # ── Step 1: Fetch from Odds API ──
     odds_rows = fetch_market_odds(target_date)
+
+    # ── Step 2: Find missing games and fill from ESPN ──
+    all_games    = get_all_games_for_date(target_date)
+    covered      = {(r["home_team"], r["away_team"]) for r in odds_rows}
+    missing      = [(h, a) for h, a in all_games if (h, a) not in covered]
+
+    if missing:
+        log(f"\n  {len(missing)} games missing from Odds API — fetching from ESPN...")
+        espn_rows = fetch_espn_odds(target_date, missing)
+        if espn_rows:
+            odds_rows.extend(espn_rows)
+            log(f"  ESPN filled {len(espn_rows)} games")
+        else:
+            log("  ⚠️  ESPN returned no data for missing games")
+
     if not odds_rows:
         log("No odds fetched for target slate.")
         return
 
-    n_saved = upsert_market_odds(odds_rows)
+    # ── Step 3: Save and link ──
+    n_saved   = upsert_market_odds(odds_rows)
     link_odds_to_games(target_date)
     n_updated = update_predictions_with_odds(target_date)
 

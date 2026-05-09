@@ -45,6 +45,9 @@ OU_WINDOW          = 20
 ATS_WINDOW         = 20
 DEFAULT_TOTAL_LINE = float(os.getenv("DEFAULT_TOTAL_LINE", "8.5"))
 
+# Calibration offset — model predicts ~1.2 runs too high vs 2026 actuals
+TOTAL_CALIBRATION  = -1.2
+
 # Batting order weights — leadoff matters most, drops toward bottom
 BATTING_ORDER_WEIGHTS = {1: 1.0, 2: 0.95, 3: 0.9, 4: 0.85, 5: 0.75,
                          6: 0.65, 7: 0.55, 8: 0.45, 9: 0.35}
@@ -298,15 +301,21 @@ def load_pitchers() -> pd.DataFrame:
 
 def load_pitcher_game_log() -> pd.DataFrame:
     if not table_exists("pitcher_game_log"):
-        return pd.DataFrame(columns=["official_date", "pitcher_name", "team", "role", "innings_pitched"])
-    df = pd.read_sql(text(
-        "SELECT official_date, pitcher_name, team, role, innings_pitched FROM pitcher_game_log"
-    ), engine)
+        return pd.DataFrame()
+    df = pd.read_sql(text("""
+        SELECT official_date, pitcher_name, team, role,
+               innings_pitched, er_allowed, hits_allowed, walks, strikeouts
+        FROM pitcher_game_log
+    """), engine)
     if df.empty:
         return df
     df["official_date"]    = pd.to_datetime(df["official_date"], errors="coerce").dt.date
     df["pitcher_name_key"] = df["pitcher_name"].astype(str).str.strip().str.lower()
     df["innings_pitched"]  = pd.to_numeric(df["innings_pitched"], errors="coerce")
+    df["er_allowed"]       = pd.to_numeric(df["er_allowed"],       errors="coerce")
+    df["hits_allowed"]     = pd.to_numeric(df["hits_allowed"],     errors="coerce")
+    df["walks"]            = pd.to_numeric(df["walks"],            errors="coerce")
+    df["strikeouts"]       = pd.to_numeric(df["strikeouts"],       errors="coerce")
     return df.dropna(subset=["official_date"])
 
 
@@ -400,11 +409,6 @@ def compute_lineup_quality(
     lineups_df: pd.DataFrame,
     bvp_df: pd.DataFrame,
 ) -> Dict[str, float]:
-    """
-    Weighted OPS score for a team's lineup vs the opposing SP.
-    Leadoff weighted 1.0, drops to 0.35 at bottom of order.
-    Falls back to league average when no BvP data exists.
-    """
     defaults = {"ops_vs_sp": LEAGUE_AVG_OPS, "hard_hit_pct": 0.35, "coverage": 0.0}
 
     if lineups_df.empty or opposing_sp_id is None:
@@ -643,12 +647,45 @@ def get_bullpen_ip_4d(pgl_df, team, target_date):
     return coerce_float(q["innings_pitched"].sum(), 4.0) or 4.0
 
 
+def get_sp_current_stats(pgl_df: pd.DataFrame, pitcher_name: str,
+                          target_date, window_starts: int = 5) -> Dict[str, float]:
+    """
+    Compute current season ERA and WHIP from pitcher_game_log.
+    Uses last N starts for recent form, falls back to season totals.
+    """
+    if pgl_df.empty or pitcher_name is None or pd.isna(pitcher_name):
+        return {"era": None, "whip": None}
+
+    key = str(pitcher_name).strip().lower()
+    sp  = pgl_df[
+        (pgl_df["pitcher_name_key"] == key) &
+        (pgl_df["role"] == "SP") &
+        (pgl_df["official_date"] < target_date)
+    ].sort_values("official_date")
+
+    if sp.empty:
+        return {"era": None, "whip": None}
+
+    recent = sp.tail(window_starts)
+    ip  = coerce_float(recent["innings_pitched"].sum(), 0.0) or 0.0
+    er  = coerce_float(recent["er_allowed"].sum(),      0.0) or 0.0
+    h   = coerce_float(recent["hits_allowed"].sum(),    0.0) or 0.0
+    bb  = coerce_float(recent["walks"].sum(),           0.0) or 0.0
+
+    if ip < 1.0:
+        return {"era": None, "whip": None}
+
+    return {
+        "era":  round((er / ip) * 9, 2),
+        "whip": round((h + bb) / ip, 3),
+    }
+
+
 # =============================================================================
 # O/U TENDENCY + ATS COVER RATE
 # =============================================================================
 
 def get_ou_over_rate(team_games: pd.DataFrame, team: str, target_date, window: int = OU_WINDOW) -> float:
-    """% of team's last N games where total runs exceeded DEFAULT_TOTAL_LINE."""
     tg = team_games[
         (team_games["team"] == team) &
         (team_games["official_date"] < target_date)
@@ -660,7 +697,6 @@ def get_ou_over_rate(team_games: pd.DataFrame, team: str, target_date, window: i
 
 
 def get_last_game_total(team_games: pd.DataFrame, team: str, target_date) -> float:
-    """Total runs in team's most recent game."""
     tg = team_games[
         (team_games["team"] == team) &
         (team_games["official_date"] < target_date)
@@ -672,7 +708,6 @@ def get_last_game_total(team_games: pd.DataFrame, team: str, target_date) -> flo
 
 
 def get_ats_cover_rate(team_games: pd.DataFrame, team: str, target_date, window: int = ATS_WINDOW) -> float:
-    """% of team's last N games where they won by 2+ runs (covered -1.5)."""
     tg = team_games[
         (team_games["team"] == team) &
         (team_games["official_date"] < target_date)
@@ -729,7 +764,6 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
 
     merged = games_df.merge(probables_df, on="game_pk", how="left") if not probables_df.empty else games_df.assign(away_sp_name=None, home_sp_name=None, home_sp_id=None, away_sp_id=None)
 
-    # game_features
     gf_df = load_game_features(merged["game_pk"].tolist())
     if not gf_df.empty:
         merged = merged.merge(gf_df, on="game_pk", how="left")
@@ -737,7 +771,6 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
     else:
         log("  ⚠️  game_features not available — using defaults")
 
-    # Vegas odds — loaded before engine so RL/O/U picks use correct lines
     odds_df = load_market_odds(merged["game_pk"].tolist())
     if not odds_df.empty:
         merged = merged.merge(odds_df, on="game_pk", how="left")
@@ -745,7 +778,6 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
     else:
         log("  ⚠️  market_odds not available — using model prob + default line")
 
-    # Lineups + BvP
     lineups_df = load_lineups_for_games(merged["game_pk"].tolist())
     sp_ids = []
     if "home_sp_id" in merged.columns:
@@ -773,8 +805,18 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         home_form = get_team_blended_form(team_games, baselines, home_team, target_date, "home", MLB_SEASON, BLEND_CUTOFF_GAMES, ROLLING_WINDOW)
         away_form = get_team_blended_form(team_games, baselines, away_team, target_date, "away", MLB_SEASON, BLEND_CUTOFF_GAMES, ROLLING_WINDOW)
 
-        home_p = get_pitcher_stats(home_sp_name, pitcher_map, league_pitcher_defaults)
-        away_p = get_pitcher_stats(away_sp_name, pitcher_map, league_pitcher_defaults)
+        # Live 2026 ERA/WHIP from game log — falls back to static pitcher table
+        home_live = get_sp_current_stats(pgl_df, home_sp_name, target_date)
+        away_live = get_sp_current_stats(pgl_df, away_sp_name, target_date)
+
+        home_p = {
+            "era":  home_live["era"]  or get_pitcher_stats(home_sp_name, pitcher_map, league_pitcher_defaults)["era"],
+            "whip": home_live["whip"] or get_pitcher_stats(home_sp_name, pitcher_map, league_pitcher_defaults)["whip"],
+        }
+        away_p = {
+            "era":  away_live["era"]  or get_pitcher_stats(away_sp_name, pitcher_map, league_pitcher_defaults)["era"],
+            "whip": away_live["whip"] or get_pitcher_stats(away_sp_name, pitcher_map, league_pitcher_defaults)["whip"],
+        }
 
         home_sp_rest = float(get_sp_rest_days(pgl_df, home_sp_name, target_date))
         away_sp_rest = float(get_sp_rest_days(pgl_df, away_sp_name, target_date))
@@ -789,7 +831,6 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         home_rd      = float(home_form["run_diff"])
         away_rd      = float(away_form["run_diff"])
 
-        # game_features
         home_wrc    = coerce_float(row.get("home_wrc_plus"),    100.0) or 100.0
         away_wrc    = coerce_float(row.get("away_wrc_plus"),    100.0) or 100.0
         sp_fip_diff = coerce_float(row.get("sp_fip_diff"),      0.0)   or 0.0
@@ -799,14 +840,12 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         temp_f      = coerce_float(row.get("temperature_f"),    72.0)  or 72.0
         wind_mph    = coerce_float(row.get("wind_speed_mph"),   7.0)   or 7.0
 
-        # Vegas odds
         mkt_home_ml   = coerce_float(row.get("market_home_ml"))
         mkt_away_ml   = coerce_float(row.get("market_away_ml"))
         mkt_home_prob = coerce_float(row.get("market_home_prob"))
         mkt_away_prob = coerce_float(row.get("market_away_prob"))
         mkt_total     = coerce_float(row.get("market_total_line"))
 
-        # O/U tendency + ATS cover rate
         home_ou_rate    = get_ou_over_rate(team_games, home_team, target_date)
         away_ou_rate    = get_ou_over_rate(team_games, away_team, target_date)
         home_last_total = get_last_game_total(team_games, home_team, target_date)
@@ -814,7 +853,6 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         home_ats_rate   = get_ats_cover_rate(team_games, home_team, target_date)
         away_ats_rate   = get_ats_cover_rate(team_games, away_team, target_date)
 
-        # Lineup quality — home bats vs away SP, away bats vs home SP
         game_pk = int(row["game_pk"])
         home_lq = compute_lineup_quality(game_pk, "home", away_sp_id, lineups_df, bvp_df)
         away_lq = compute_lineup_quality(game_pk, "away", home_sp_id, lineups_df, bvp_df)
@@ -908,12 +946,6 @@ def build_pick_columns(df: pd.DataFrame) -> pd.DataFrame:
         return "PASS"
 
     def get_rl(r, ml):
-        """
-        Uses Vegas moneylines to identify underdog/favorite correctly.
-        If ML liked the underdog → underdog +1.5.
-        If model mean favors underdog ≥40% → underdog +1.5.
-        If ML liked favorite AND run diff > 1.5 → favorite -1.5.
-        """
         rd             = coerce_float(r.get("run_diff_pred"))
         home_prob      = coerce_float(r.get("home_win_prob"))
         market_home_ml = coerce_float(r.get("market_home_ml"))
@@ -946,17 +978,24 @@ def build_pick_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     def get_ou(r):
         """
-        Uses Vegas market line when available to avoid OVER bias.
-        The model predicts ~9.4 runs avg but Vegas sets lines at 7.5-8.5,
-        so comparing against Vegas line gives much more balanced OVER/UNDER picks.
+        Picks OVER/UNDER using calibrated model total vs Vegas line.
+        Three tiers:
+          1. Strong: full CI above/below line → high confidence
+          2. Moderate: mean exceeds line by 0.5+ runs → medium confidence
+          3. PASS: model and Vegas agree within 0.5 runs
         """
-        lo = coerce_float(r.get("total_runs_lo"))
-        hi = coerce_float(r.get("total_runs_hi"))
-        if lo is None or hi is None: return None
-        # Vegas line first — fixes systematic OVER bias
+        mean = coerce_float(r.get("total_runs_pred"))
+        lo   = coerce_float(r.get("total_runs_lo"))
+        hi   = coerce_float(r.get("total_runs_hi"))
+        if mean is None or lo is None or hi is None:
+            return None
         line = coerce_float(r.get("market_total_line")) or DEFAULT_TOTAL_LINE
-        if lo > line: return "OVER"
-        if hi < line: return "UNDER"
+        # Strong signal — full CI on one side of the line
+        if lo > line:   return "OVER"
+        if hi < line:   return "UNDER"
+        # Moderate signal — mean clearly exceeds line by threshold
+        if mean > line + 0.5: return "OVER"
+        if mean < line - 0.5: return "UNDER"
         return "PASS"
 
     df["ml_pick"]      = df.apply(get_ml, axis=1)
@@ -981,7 +1020,6 @@ def build_top_plays(df, total_line=DEFAULT_TOTAL_LINE):
         tlo       = coerce_float(r.get("total_runs_lo"))
         thi       = coerce_float(r.get("total_runs_hi"))
         tmean     = coerce_float(r.get("total_runs_pred"))
-        # Use Vegas line for top play scoring too
         game_line = coerce_float(r.get("market_total_line")) or total_line
 
         if tlo and tlo > game_line:
@@ -1127,9 +1165,9 @@ def main() -> None:
 
     log(f"Features ({len(feature_cols)}): {feature_cols}")
 
-    home_prob, home_lo, home_hi, home_std = predict_ml_ensemble(bundle["win_models"], X)
-    run_pred,  run_lo,  run_hi,  run_std  = predict_regression_ensemble(bundle["run_models"], X)
-    total_pred,total_lo,total_hi,total_std = predict_regression_ensemble(bundle["total_models"], X)
+    home_prob,  home_lo,  home_hi,  home_std  = predict_ml_ensemble(bundle["win_models"], X)
+    run_pred,   run_lo,   run_hi,   run_std   = predict_regression_ensemble(bundle["run_models"], X)
+    total_pred, total_lo, total_hi, total_std = predict_regression_ensemble(bundle["total_models"], X)
 
     out = features_df.copy()
     out["home_win_prob"]     = home_prob
@@ -1143,9 +1181,11 @@ def main() -> None:
     out["run_diff_lo"]       = run_lo
     out["run_diff_hi"]       = run_hi
     out["run_diff_std"]      = run_std
-    out["total_runs_pred"]   = total_pred
-    out["total_runs_lo"]     = total_lo
-    out["total_runs_hi"]     = total_hi
+
+    # Apply calibration offset — model predicts ~1.2 runs too high vs 2026 actuals
+    out["total_runs_pred"]   = total_pred + TOTAL_CALIBRATION
+    out["total_runs_lo"]     = total_lo   + TOTAL_CALIBRATION
+    out["total_runs_hi"]     = total_hi   + TOTAL_CALIBRATION
     out["total_runs_std"]    = total_std
 
     out = build_pick_columns(out)
@@ -1163,10 +1203,10 @@ def main() -> None:
         log(top_plays.to_string(index=False))
         for i, (_, row) in enumerate(top_plays.iterrows(), start=1):
             mask = out["game_pk"] == row["game_pk"]
-            out.loc[mask, "play_rank"]  = i
-            out.loc[mask, "play_type"]  = row["bet_type"]
-            out.loc[mask, "play_score"] = row["score"]
-            out.loc[mask, "play_detail"]= row["extra"]
+            out.loc[mask, "play_rank"]   = i
+            out.loc[mask, "play_type"]   = row["bet_type"]
+            out.loc[mask, "play_score"]  = row["score"]
+            out.loc[mask, "play_detail"] = row["extra"]
 
     upsert_predictions(out)
 
