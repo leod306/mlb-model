@@ -30,23 +30,28 @@ else:
 
 # ---------------------------------------------------------------------------
 # Compute differential features inline from CSV columns
+# NOTE: run_diff_form_diff, runs_scored_diff, runs_allowed_diff, win_pct_diff
+# are intentionally NOT computed or included — they duplicate signals already
+# in the raw home/away rolling features and cause triple-counting.
 # ---------------------------------------------------------------------------
 
 def add_diff(df, col_a, col_b, new_col, default_a=0.0, default_b=0.0):
-    a = pd.to_numeric(df.get(col_a, default_a), errors="coerce").fillna(default_a)
-    b = pd.to_numeric(df.get(col_b, default_b), errors="coerce").fillna(default_b)
+    a = pd.to_numeric(df[col_a], errors="coerce").fillna(default_a) if col_a in df.columns else pd.Series(default_a, index=df.index)
+    b = pd.to_numeric(df[col_b], errors="coerce").fillna(default_b) if col_b in df.columns else pd.Series(default_b, index=df.index)
     df[new_col] = a - b
     return df
 
-df = add_diff(df, "home_last10_run_diff",    "away_last10_run_diff",    "run_diff_form_diff")
-df = add_diff(df, "home_last10_runs_scored", "away_last10_runs_scored", "runs_scored_diff")
-df = add_diff(df, "home_last10_runs_allowed","away_last10_runs_allowed","runs_allowed_diff")
-df = add_diff(df, "home_sp_rest_days",       "away_sp_rest_days",       "sp_rest_diff",       5.0, 5.0)
-df = add_diff(df, "home_bullpen_ip_4d",      "away_bullpen_ip_4d",      "bullpen_usage_diff",  4.0, 4.0)
-df = add_diff(df, "home_win_pct_home",       "away_win_pct_away",       "win_pct_diff",        0.5, 0.5)
-df = add_diff(df, "home_ou_over_rate",       "away_ou_over_rate",       "ou_over_rate_diff",   0.5, 0.5)
-df = add_diff(df, "home_last_game_total",    "away_last_game_total",    "last_game_total_diff",8.5, 8.5)
-df = add_diff(df, "home_ats_cover_rate",     "away_ats_cover_rate",     "ats_cover_rate_diff", 0.5, 0.5)
+# Keep: bullpen diff, rest diff, O/U diffs, ATS diff — these add directional
+# signal not already present as individual raw features
+df = add_diff(df, "home_sp_rest_days",    "away_sp_rest_days",    "sp_rest_diff",         5.0, 5.0)
+df = add_diff(df, "home_bullpen_ip_4d",   "away_bullpen_ip_4d",   "bullpen_usage_diff",   4.0, 4.0)
+df = add_diff(df, "home_ou_over_rate",    "away_ou_over_rate",    "ou_over_rate_diff",    0.5, 0.5)
+df = add_diff(df, "home_last_game_total", "away_last_game_total", "last_game_total_diff", 8.5, 8.5)
+df = add_diff(df, "home_ats_cover_rate",  "away_ats_cover_rate",  "ats_cover_rate_diff",  0.5, 0.5)
+
+# Lineup OPS diff — computed from BvP-weighted lineup scores
+# Falls back to 0.0 (neutral) if not in training data yet
+df = add_diff(df, "home_lineup_ops_vs_sp", "away_lineup_ops_vs_sp", "lineup_ops_diff", 0.720, 0.720)
 
 
 # ---------------------------------------------------------------------------
@@ -76,26 +81,35 @@ ROLLING_FEATURES = [
     "away_last10_run_diff",
 ]
 
+# Kept diffs: these add directional signal beyond what raw features provide
+# Removed: run_diff_form_diff, runs_scored_diff, runs_allowed_diff, win_pct_diff
+#   — those were near-perfect duplicates of raw rolling/win_pct features
 DIFFERENTIAL_FEATURES = [
-    "run_diff_form_diff",
-    "runs_scored_diff",
-    "runs_allowed_diff",
     "sp_rest_diff",
     "bullpen_usage_diff",
-    "win_pct_diff",
 ]
 
-# New features — O/U tendency, ATS cover rate, last game total
 BETTING_FEATURES = [
-    "home_ou_over_rate",       # % of home team games going OVER last 20
-    "away_ou_over_rate",       # % of away team games going OVER last 20
-    "ou_over_rate_diff",       # differential
-    "home_last_game_total",    # total runs in home team's last game
-    "away_last_game_total",    # total runs in away team's last game
-    "last_game_total_diff",    # differential
-    "home_ats_cover_rate",     # % of home team games covering -1.5 last 20
-    "away_ats_cover_rate",     # % of away team games covering -1.5 last 20
-    "ats_cover_rate_diff",     # differential
+    "home_ou_over_rate",
+    "away_ou_over_rate",
+    "ou_over_rate_diff",
+    "home_last_game_total",
+    "away_last_game_total",
+    "last_game_total_diff",
+    "home_ats_cover_rate",
+    "away_ats_cover_rate",
+    "ats_cover_rate_diff",
+]
+
+# Lineup quality features — BvP-weighted OPS vs opposing SP
+# These will be 0.720 (league avg) for games without lineup data,
+# and real matchup values for games with BvP coverage
+LINEUP_FEATURES = [
+    "home_lineup_ops_vs_sp",
+    "away_lineup_ops_vs_sp",
+    "lineup_ops_diff",
+    "home_lineup_hard_hit",
+    "away_lineup_hard_hit",
 ]
 
 FEATURES = (
@@ -103,7 +117,8 @@ FEATURES = (
     SITUATIONAL_FEATURES +
     ROLLING_FEATURES +
     DIFFERENTIAL_FEATURES +
-    BETTING_FEATURES
+    BETTING_FEATURES +
+    LINEUP_FEATURES
 )
 
 print(f"\nFeature set ({len(FEATURES)} features):")
@@ -117,40 +132,42 @@ print()
 # ---------------------------------------------------------------------------
 
 defaults = {
-    "era_diff":               0.0,
-    "whip_diff":              0.0,
-    "home_sp_rest_days":      5.0,
-    "away_sp_rest_days":      5.0,
-    "home_bullpen_ip_4d":     4.0,
-    "away_bullpen_ip_4d":     4.0,
-    "home_win_pct_home":      0.5,
-    "away_win_pct_away":      0.5,
+    "era_diff":                 0.0,
+    "whip_diff":                0.0,
+    "home_sp_rest_days":        5.0,
+    "away_sp_rest_days":        5.0,
+    "home_bullpen_ip_4d":       4.0,
+    "away_bullpen_ip_4d":       4.0,
+    "home_win_pct_home":        0.5,
+    "away_win_pct_away":        0.5,
     "home_last10_runs_scored":  4.5,
     "away_last10_runs_scored":  4.5,
     "home_last10_runs_allowed": 4.5,
     "away_last10_runs_allowed": 4.5,
     "home_last10_run_diff":     0.0,
     "away_last10_run_diff":     0.0,
-    "run_diff_form_diff":   0.0,
-    "runs_scored_diff":     0.0,
-    "runs_allowed_diff":    0.0,
-    "sp_rest_diff":         0.0,
-    "bullpen_usage_diff":   0.0,
-    "win_pct_diff":         0.0,
-    "home_ou_over_rate":    0.5,
-    "away_ou_over_rate":    0.5,
-    "ou_over_rate_diff":    0.0,
-    "home_last_game_total": 8.5,
-    "away_last_game_total": 8.5,
-    "last_game_total_diff": 0.0,
-    "home_ats_cover_rate":  0.5,
-    "away_ats_cover_rate":  0.5,
-    "ats_cover_rate_diff":  0.0,
+    "sp_rest_diff":             0.0,
+    "bullpen_usage_diff":       0.0,
+    "home_ou_over_rate":        0.5,
+    "away_ou_over_rate":        0.5,
+    "ou_over_rate_diff":        0.0,
+    "home_last_game_total":     8.5,
+    "away_last_game_total":     8.5,
+    "last_game_total_diff":     0.0,
+    "home_ats_cover_rate":      0.5,
+    "away_ats_cover_rate":      0.5,
+    "ats_cover_rate_diff":      0.0,
+    # Lineup features — default to league avg / neutral when not available
+    "home_lineup_ops_vs_sp":    0.720,
+    "away_lineup_ops_vs_sp":    0.720,
+    "lineup_ops_diff":          0.0,
+    "home_lineup_hard_hit":     0.35,
+    "away_lineup_hard_hit":     0.35,
 }
 
 for col, default in defaults.items():
     if col not in df.columns:
-        print(f"  ⚠️ '{col}' not in dataset — filling with {default}")
+        print(f"  ⚠️  '{col}' not in dataset — filling with {default}")
         df[col] = default
 
 missing = [c for c in FEATURES if c not in df.columns]
@@ -168,6 +185,17 @@ df = df.dropna(subset=["game_date"]).sort_values("game_date").copy()
 for col in FEATURES:
     df[col] = pd.to_numeric(df[col], errors="coerce")
 df[FEATURES] = df[FEATURES].fillna(defaults)
+
+# ---------------------------------------------------------------------------
+# Report lineup feature coverage in training data
+# ---------------------------------------------------------------------------
+lineup_coverage = (df["home_lineup_ops_vs_sp"] != 0.720).mean()
+print(f"Lineup feature coverage in training data: {lineup_coverage:.1%}")
+if lineup_coverage < 0.05:
+    print("  ⚠️  Most lineup features are defaulting to 0.720 (league avg).")
+    print("  ⚠️  Model will learn limited lineup signal — coverage improves as BvP data accumulates.")
+else:
+    print(f"  ✓ {lineup_coverage:.1%} of training rows have real BvP lineup scores")
 
 split_index = int(len(df) * 0.8)
 train = df.iloc[:split_index].copy()
@@ -317,7 +345,8 @@ joblib.dump(win_models,   win_models_path)
 meta = {
     "features":      FEATURES,
     "team_classes_": le.classes_.tolist(),
-    "note":          "Ensemble — pitcher + situational + rolling + differential + betting tendency features",
+    "note":          "Ensemble — pitcher + situational + rolling + differential + betting + lineup features. "
+                     "Removed redundant diffs: run_diff_form_diff, runs_scored_diff, runs_allowed_diff, win_pct_diff.",
     "n_models":      N_MODELS,
 }
 joblib.dump(meta, meta_path)

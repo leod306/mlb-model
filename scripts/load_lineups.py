@@ -1,10 +1,11 @@
 """
 load_lineups.py
 ---------------
-DAILY script. Run this every day as part of mlb_quick_update.py.
+DAILY script. Run this every day as part of run_full_update.py.
 
 What it does:
   1. Fetches today's batting lineups from the MLB Stats API live feed
+     → Falls back to RotoWire lineups (already in DB) if live feed is empty
   2. For each batter vs opposing SP, checks if BvP data already exists in DB
      - If cached → skips (fast)
      - If new matchup → fetches from Baseball Savant and saves
@@ -16,9 +17,6 @@ Run time:
 
 To force re-fetch all pairs for today:
   BVP_FORCE_REFRESH=1 python scripts/load_lineups.py
-
-Add to mlb_quick_update.py:
-  run_step("Load Lineups", "scripts/load_lineups.py")
 """
 from __future__ import annotations
 
@@ -49,9 +47,8 @@ HTTP_TIMEOUT  = 20
 SLEEP         = float(os.getenv("REQUEST_SLEEP_SECONDS", "0.15"))
 FORCE_REFRESH = os.getenv("BVP_FORCE_REFRESH", "0") == "1"
 
-MLB_FEED      = "https://statsapi.mlb.com/api/v1.1/game/{gamePk}/feed/live"
+MLB_FEED = "https://statsapi.mlb.com/api/v1.1/game/{gamePk}/feed/live"
 
-# Must match what load_bvp_history.py used so stats are comparable
 BACKFILL_START = os.getenv("BVP_START_DATE", "2024-03-01")
 TODAY_STR      = date.today().isoformat()
 
@@ -126,7 +123,7 @@ def bvp_already_cached(cur, batter_id: int, pitcher_id: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# MLB API
+# MLB API live feed
 # ---------------------------------------------------------------------------
 
 def get_json(url: str) -> dict:
@@ -136,6 +133,7 @@ def get_json(url: str) -> dict:
 
 
 def fetch_lineup_from_feed(game_pk: int) -> dict:
+    """Fetch live lineup from MLB feed. Returns empty sides if not posted yet."""
     try:
         data = get_json(MLB_FEED.format(gamePk=game_pk))
     except Exception as e:
@@ -167,7 +165,42 @@ def fetch_lineup_from_feed(game_pk: int) -> dict:
     return result
 
 
-def upsert_lineups(cur, game_pk: int, off_date, team_home: str, team_away: str, lineup: dict) -> int:
+# ---------------------------------------------------------------------------
+# RotoWire fallback — read lineups already saved to DB by load_rotowire_lineups.py
+# ---------------------------------------------------------------------------
+
+def fetch_lineup_from_db(cur, game_pk: int) -> dict:
+    """
+    Read lineup rows already saved to the lineups table (by load_rotowire_lineups.py).
+    Returns same shape as fetch_lineup_from_feed: {"home": [...], "away": [...]}
+    """
+    cur.execute(f"""
+        SELECT side, batting_order, player_id, player_name, position
+        FROM {LINEUP_TABLE}
+        WHERE game_pk = %s
+        ORDER BY side, batting_order
+    """, (game_pk,))
+    rows = cur.fetchall()
+
+    result = {"home": [], "away": []}
+    for side, batting_order, player_id, player_name, position in rows:
+        if side not in result or player_id is None:
+            continue
+        result[side].append({
+            "batting_order": batting_order,
+            "player_id":     int(player_id),
+            "player_name":   player_name or f"Player {player_id}",
+            "position":      position or "",
+        })
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Upsert lineups
+# ---------------------------------------------------------------------------
+
+def upsert_lineups(cur, game_pk: int, off_date, team_home: str, team_away: str,
+                   lineup: dict) -> int:
     rows = []
     now  = datetime.now(timezone.utc)
     side_team = {"home": team_home, "away": team_away}
@@ -185,7 +218,8 @@ def upsert_lineups(cur, game_pk: int, off_date, team_home: str, team_away: str, 
 
     execute_values(cur, f"""
         INSERT INTO {LINEUP_TABLE}
-          (game_pk, official_date, team, side, batting_order, player_id, player_name, position, updated_at)
+          (game_pk, official_date, team, side, batting_order,
+           player_id, player_name, position, updated_at)
         VALUES %s
         ON CONFLICT (game_pk, side, batting_order) DO UPDATE SET
           player_id   = EXCLUDED.player_id,
@@ -197,7 +231,7 @@ def upsert_lineups(cur, game_pk: int, off_date, team_home: str, team_away: str, 
 
 
 # ---------------------------------------------------------------------------
-# Statcast fetch (single batter vs single pitcher)
+# Statcast BvP fetch
 # ---------------------------------------------------------------------------
 
 def _safe(val, default=None):
@@ -240,7 +274,11 @@ def fetch_bvp_statcast(
     if pa == 0:
         return None
 
-    ab         = int(events.isin(["single","double","triple","home_run","strikeout","strikeout_double_play","field_out","grounded_into_double_play","force_out","field_error","fielders_choice","fielders_choice_out","double_play","triple_play"]).sum())
+    ab         = int(events.isin(["single","double","triple","home_run","strikeout",
+                                   "strikeout_double_play","field_out",
+                                   "grounded_into_double_play","force_out","field_error",
+                                   "fielders_choice","fielders_choice_out",
+                                   "double_play","triple_play"]).sum())
     hits       = int(events.isin(["single","double","triple","home_run"]).sum())
     doubles    = int((events == "double").sum())
     triples    = int((events == "triple").sum())
@@ -317,11 +355,11 @@ def empty_bvp_row(batter_id, batter_name, pitcher_id, pitcher_name) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Process one side
+# Process BvP for one side
 # ---------------------------------------------------------------------------
 
-def process_side(cur, batters, sp_id, sp_name, label) -> tuple[int, int]:
-    """Returns (fetched, cached) counts."""
+def process_side(cur, batters: list, sp_id, sp_name: str, label: str) -> tuple[int, int]:
+    """Fetch/cache BvP for each batter vs the opposing SP. Returns (fetched, cached)."""
     if not sp_id or not batters:
         print(f"  {label}: no SP set, skipping")
         return 0, 0
@@ -382,31 +420,64 @@ def main():
             games = cur.fetchall()
 
             if not games:
-                print(f"No games found for {target} — tables created, nothing to fetch.")
+                print(f"No games found for {target}.")
                 c.commit()
                 return
 
             print(f"Found {len(games)} games\n")
             total_lineup = total_fetched = total_cached = 0
+            live_count   = rotowire_count = empty_count = 0
 
-            for game_pk, off_date, home_team, away_team, home_sp_id, home_sp_name, away_sp_id, away_sp_name in games:
+            for (game_pk, off_date, home_team, away_team,
+                 home_sp_id, home_sp_name, away_sp_id, away_sp_name) in games:
+
                 print(f"--- {away_team} @ {home_team} (pk={game_pk}) ---")
 
+                # ── Step 1: try official MLB live feed ────────────────────
                 lineup = fetch_lineup_from_feed(int(game_pk))
-                n = upsert_lineups(cur, int(game_pk), off_date, home_team, away_team, lineup)
-                total_lineup += n
-                print(f"  Lineup: {len(lineup['away'])} away | {len(lineup['home'])} home batters")
+                home_count = len(lineup["home"])
+                away_count = len(lineup["away"])
+
+                # ── Step 2: fall back to RotoWire rows already in DB ──────
+                if home_count == 0 and away_count == 0:
+                    lineup = fetch_lineup_from_db(cur, int(game_pk))
+                    home_count = len(lineup["home"])
+                    away_count = len(lineup["away"])
+
+                    if home_count > 0 or away_count > 0:
+                        source = "RotoWire (DB)"
+                        rotowire_count += 1
+                    else:
+                        source = "no lineup available"
+                        empty_count += 1
+                else:
+                    source = "MLB live feed"
+                    live_count += 1
+                    # Official lineup — upsert to overwrite any RotoWire rows
+                    n = upsert_lineups(cur, int(game_pk), off_date,
+                                       home_team, away_team, lineup)
+                    total_lineup += n
+
+                print(f"  Lineup source : {source}")
+                print(f"  Lineup        : {away_count} away | {home_count} home batters")
 
                 if SLEEP:
                     time.sleep(SLEEP)
 
-                f, ca = process_side(cur, lineup["away"], home_sp_id, home_sp_name,
-                                     f"Away vs {home_sp_name or 'TBD'}")
+                # ── Step 3: BvP for each side ─────────────────────────────
+                # Away batters face HOME sp
+                f, ca = process_side(
+                    cur, lineup["away"], home_sp_id, home_sp_name,
+                    f"Away vs {home_sp_name or 'TBD'}"
+                )
                 total_fetched += f
                 total_cached  += ca
 
-                f, ca = process_side(cur, lineup["home"], away_sp_id, away_sp_name,
-                                     f"Home vs {away_sp_name or 'TBD'}")
+                # Home batters face AWAY sp
+                f, ca = process_side(
+                    cur, lineup["home"], away_sp_id, away_sp_name,
+                    f"Home vs {away_sp_name or 'TBD'}"
+                )
                 total_fetched += f
                 total_cached  += ca
                 print()
@@ -414,6 +485,10 @@ def main():
             c.commit()
 
         print(f"{'='*55}")
+        print(f"  Lineup source breakdown:")
+        print(f"    MLB live feed  : {live_count} games")
+        print(f"    RotoWire (DB)  : {rotowire_count} games")
+        print(f"    No lineup      : {empty_count} games")
         print(f"  Lineup rows upserted       : {total_lineup}")
         print(f"  BvP pairs cached (skipped) : {total_cached}")
         print(f"  BvP pairs newly fetched    : {total_fetched}")

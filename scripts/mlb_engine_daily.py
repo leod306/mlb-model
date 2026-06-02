@@ -48,6 +48,10 @@ DEFAULT_TOTAL_LINE = float(os.getenv("DEFAULT_TOTAL_LINE", "8.5"))
 # Calibration offset — model predicts ~1.2 runs too high vs 2026 actuals
 TOTAL_CALIBRATION  = -1.2
 
+# Home bias correction — model picks home 75% of the time vs actual ~54%
+# Shift home win prob down 3% before making pick decisions
+HOME_BIAS_CORRECTION = 0.03
+
 # Batting order weights — leadoff matters most, drops toward bottom
 BATTING_ORDER_WEIGHTS = {1: 1.0, 2: 0.95, 3: 0.9, 4: 0.85, 5: 0.75,
                          6: 0.65, 7: 0.55, 8: 0.45, 9: 0.35}
@@ -184,12 +188,8 @@ def ensure_predictions_table() -> None:
         "park_run_factor":        "DOUBLE PRECISION",
         "temperature_f":          "DOUBLE PRECISION",
         "wind_speed_mph":         "DOUBLE PRECISION",
-        "run_diff_form_diff":     "DOUBLE PRECISION",
-        "runs_scored_diff":       "DOUBLE PRECISION",
-        "runs_allowed_diff":      "DOUBLE PRECISION",
         "sp_rest_diff":           "DOUBLE PRECISION",
         "bullpen_usage_diff":     "DOUBLE PRECISION",
-        "win_pct_diff":           "DOUBLE PRECISION",
         "home_ou_over_rate":      "DOUBLE PRECISION",
         "away_ou_over_rate":      "DOUBLE PRECISION",
         "home_last_game_total":   "DOUBLE PRECISION",
@@ -393,7 +393,7 @@ def load_bvp_for_pitchers(pitcher_ids: list) -> pd.DataFrame:
             SELECT batter_id, pitcher_id, avg, obp, slg, hard_hit_pct, avg_exit_velo, pa
             FROM batter_vs_pitcher
             WHERE pitcher_id = ANY(:pids)
-              AND pa >= 3
+              AND pa >= 2
         """)
         with engine.begin() as conn:
             return pd.read_sql(sql, conn, params={"pids": pitcher_ids})
@@ -649,10 +649,6 @@ def get_bullpen_ip_4d(pgl_df, team, target_date):
 
 def get_sp_current_stats(pgl_df: pd.DataFrame, pitcher_name: str,
                           target_date, window_starts: int = 5) -> Dict[str, float]:
-    """
-    Compute current season ERA and WHIP from pitcher_game_log.
-    Uses last N starts for recent form, falls back to season totals.
-    """
     if pgl_df.empty or pitcher_name is None or pd.isna(pitcher_name):
         return {"era": None, "whip": None}
 
@@ -805,7 +801,6 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         home_form = get_team_blended_form(team_games, baselines, home_team, target_date, "home", MLB_SEASON, BLEND_CUTOFF_GAMES, ROLLING_WINDOW)
         away_form = get_team_blended_form(team_games, baselines, away_team, target_date, "away", MLB_SEASON, BLEND_CUTOFF_GAMES, ROLLING_WINDOW)
 
-        # Live 2026 ERA/WHIP from game log — falls back to static pitcher table
         home_live = get_sp_current_stats(pgl_df, home_sp_name, target_date)
         away_live = get_sp_current_stats(pgl_df, away_sp_name, target_date)
 
@@ -938,11 +933,16 @@ def build_pick_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
     def get_ml(r):
-        lo = coerce_float(r.get("home_win_prob_lo"))
-        hi = coerce_float(r.get("home_win_prob_hi"))
-        if lo is None or hi is None: return "PASS"
-        if lo > 0.45: return r["home_team"]
-        if hi < 0.55: return r["away_team"]
+        lo   = coerce_float(r.get("home_win_prob_lo"))
+        hi   = coerce_float(r.get("home_win_prob_hi"))
+        if lo is None or hi is None:
+            return "PASS"
+
+        lo_adj = lo - HOME_BIAS_CORRECTION
+        hi_adj = hi - HOME_BIAS_CORRECTION
+
+        if lo_adj > 0.48:  return r["home_team"]
+        if hi_adj < 0.52:  return r["away_team"]
         return "PASS"
 
     def get_rl(r, ml):
@@ -977,23 +977,14 @@ def build_pick_columns(df: pd.DataFrame) -> pd.DataFrame:
         return "PASS"
 
     def get_ou(r):
-        """
-        Picks OVER/UNDER using calibrated model total vs Vegas line.
-        Three tiers:
-          1. Strong: full CI above/below line → high confidence
-          2. Moderate: mean exceeds line by 0.5+ runs → medium confidence
-          3. PASS: model and Vegas agree within 0.5 runs
-        """
         mean = coerce_float(r.get("total_runs_pred"))
         lo   = coerce_float(r.get("total_runs_lo"))
         hi   = coerce_float(r.get("total_runs_hi"))
         if mean is None or lo is None or hi is None:
             return None
         line = coerce_float(r.get("market_total_line")) or DEFAULT_TOTAL_LINE
-        # Strong signal — full CI on one side of the line
-        if lo > line:   return "OVER"
-        if hi < line:   return "UNDER"
-        # Moderate signal — mean clearly exceeds line by threshold
+        if lo > line:         return "OVER"
+        if hi < line:         return "UNDER"
         if mean > line + 0.5: return "OVER"
         if mean < line - 0.5: return "UNDER"
         return "PASS"
@@ -1012,10 +1003,13 @@ def build_top_plays(df, total_line=DEFAULT_TOTAL_LINE):
         hi   = coerce_float(r.get("home_win_prob_hi"))
         mean = coerce_float(r.get("home_win_prob"))
 
-        if lo and lo > 0.5:
-            rows.append({"game_pk":r["game_pk"],"bet_type":"ML","pick":home,"matchup":f"{away} @ {home}","score":lo-0.5,"model_value":mean,"extra":f"CI: {lo:.3f} to {hi:.3f}"})
-        elif hi and hi < 0.5:
-            rows.append({"game_pk":r["game_pk"],"bet_type":"ML","pick":away,"matchup":f"{away} @ {home}","score":0.5-hi,"model_value":1-mean if mean else None,"extra":f"Home CI: {lo:.3f} to {hi:.3f}"})
+        lo_adj = (lo - HOME_BIAS_CORRECTION) if lo is not None else None
+        hi_adj = (hi - HOME_BIAS_CORRECTION) if hi is not None else None
+
+        if lo_adj and lo_adj > 0.5:
+            rows.append({"game_pk":r["game_pk"],"bet_type":"ML","pick":home,"matchup":f"{away} @ {home}","score":lo_adj-0.5,"model_value":mean,"extra":f"CI: {lo:.3f} to {hi:.3f}"})
+        elif hi_adj and hi_adj < 0.5:
+            rows.append({"game_pk":r["game_pk"],"bet_type":"ML","pick":away,"matchup":f"{away} @ {home}","score":0.5-hi_adj,"model_value":1-mean if mean else None,"extra":f"Home CI: {lo:.3f} to {hi:.3f}"})
 
         tlo       = coerce_float(r.get("total_runs_lo"))
         thi       = coerce_float(r.get("total_runs_hi"))
@@ -1137,6 +1131,14 @@ def main() -> None:
 
     bundle = load_model_bundle()
 
+    # -------------------------------------------------------------------------
+    # FEATURE COLUMNS
+    # NOTE: run_diff_form_diff, runs_scored_diff, runs_allowed_diff, win_pct_diff
+    # were removed — they are derived diffs that nearly duplicate signals already
+    # present in the raw home/away features, causing triple-counting of form and
+    # win% signal. Removing them frees weight for SP and lineup features.
+    # Retrain mlb_model.pkl after making this change.
+    # -------------------------------------------------------------------------
     feature_cols = bundle.get("feature_cols") or [
         "era_diff", "whip_diff",
         "home_sp_rest_days", "away_sp_rest_days",
@@ -1145,8 +1147,7 @@ def main() -> None:
         "home_last10_runs_scored", "away_last10_runs_scored",
         "home_last10_runs_allowed", "away_last10_runs_allowed",
         "home_last10_run_diff", "away_last10_run_diff",
-        "run_diff_form_diff", "runs_scored_diff", "runs_allowed_diff",
-        "sp_rest_diff", "bullpen_usage_diff", "win_pct_diff",
+        "sp_rest_diff", "bullpen_usage_diff",
         "home_ou_over_rate", "away_ou_over_rate",
         "home_last_game_total", "away_last_game_total",
         "home_ats_cover_rate", "away_ats_cover_rate",
@@ -1182,7 +1183,6 @@ def main() -> None:
     out["run_diff_hi"]       = run_hi
     out["run_diff_std"]      = run_std
 
-    # Apply calibration offset — model predicts ~1.2 runs too high vs 2026 actuals
     out["total_runs_pred"]   = total_pred + TOTAL_CALIBRATION
     out["total_runs_lo"]     = total_lo   + TOTAL_CALIBRATION
     out["total_runs_hi"]     = total_hi   + TOTAL_CALIBRATION

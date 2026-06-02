@@ -7,12 +7,19 @@ in the lineups table with source='rotowire'.
 Official MLB lineups (source='mlb') always win — never overwritten.
 Falls back to league avg OPS if no lineups available.
 
+Player ID resolution order:
+  1. lineups table (source='mlb') — best source, exact IDs from MLB feed
+  2. game_probables table — covers SPs
+  3. MLB People search API — fallback for unresolved names
+  4. None — saved as NULL, BvP will skip but lineup OPS still uses league avg
+
 Run order: BEFORE mlb_engine_daily.py
 """
 from __future__ import annotations
 
 import os
 import re
+import unicodedata
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -48,8 +55,9 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
+MLB_PEOPLE_SEARCH = "https://statsapi.mlb.com/api/v1/people/search"
+
 TEAM_MAP = {
-    # Full names
     "Arizona Diamondbacks": "ARI",   "Atlanta Braves": "ATL",
     "Baltimore Orioles": "BAL",      "Boston Red Sox": "BOS",
     "Chicago Cubs": "CHC",           "Chicago White Sox": "CWS",
@@ -66,7 +74,6 @@ TEAM_MAP = {
     "St. Louis Cardinals": "STL",    "Tampa Bay Rays": "TB",
     "Texas Rangers": "TEX",          "Toronto Blue Jays": "TOR",
     "Washington Nationals": "WSH",
-    # Short names
     "D-backs": "ARI",   "Diamondbacks": "ARI",
     "Braves": "ATL",    "Orioles": "BAL",
     "Red Sox": "BOS",   "Cubs": "CHC",
@@ -82,7 +89,6 @@ TEAM_MAP = {
     "Mariners": "SEA",  "Cardinals": "STL",
     "Rays": "TB",       "Rangers": "TEX",
     "Blue Jays": "TOR", "Nationals": "WSH",
-    # Abbreviations
     "ARI": "ARI", "ATL": "ATL", "BAL": "BAL", "BOS": "BOS",
     "CHC": "CHC", "CWS": "CWS", "CIN": "CIN", "CLE": "CLE",
     "COL": "COL", "DET": "DET", "HOU": "HOU", "KC":  "KC",
@@ -98,32 +104,177 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def normalize_name(name: str) -> str:
+    """Lowercase, strip accents, remove punctuation for fuzzy matching."""
+    if not name:
+        return ""
+    # Normalize unicode (é → e, etc.)
+    nfkd = unicodedata.normalize("NFKD", name)
+    ascii_name = "".join(c for c in nfkd if not unicodedata.combining(c))
+    # Lowercase, remove punctuation except spaces
+    clean = re.sub(r"[^a-z\s]", "", ascii_name.lower())
+    return " ".join(clean.split())
+
+
 def should_skip(raw: str) -> bool:
-    """
-    Return True if this text is NOT a real batter.
-    Filters: SP name+ERA lines, placeholder text, DK salaries.
-    """
     t = raw.strip().replace("\xa0", " ").replace("\u00a0", " ")
     if not t or len(t) < 2:
         return True
-    # Pitcher line — contains ERA anywhere in the string
     if "ERA" in t:
         return True
-    # Placeholder rows
     if t in ("Expected Lineup", "Confirmed Lineup", "Projected Lineup"):
         return True
-    # DraftKings salary rows like $4,100
     if re.match(r"^\$[\d,]+$", t):
         return True
     return False
 
 
 def clean_name(raw: str) -> str:
-    """Strip handedness suffix (L/R/S at end) and whitespace."""
     t = raw.strip().replace("\xa0", " ").replace("\u00a0", " ")
-    # Remove trailing handedness indicator
     t = re.sub(r"\s*[LRS]$", "", t).strip()
     return t
+
+
+# =============================================================================
+# PLAYER ID CACHE — built from existing DB data, no API needed
+# =============================================================================
+
+def build_player_id_cache() -> tuple[dict[str, int], dict[str, list]]:
+    """
+    Build two lookup structures from existing DB data:
+    1. full_cache: normalized full name -> player_id
+    2. last_cache: normalized last name -> [(full_name, player_id), ...]
+       Used to match RotoWire abbreviated names like "T. Bazzana"
+    """
+    full_cache: dict[str, int] = {}
+    last_cache: dict[str, list] = {}
+
+    def add(name: str, pid: int, overwrite: bool = True) -> None:
+        key = normalize_name(name)
+        if not key:
+            return
+        if overwrite or key not in full_cache:
+            full_cache[key] = pid
+        parts = key.split()
+        if parts:
+            last = parts[-1]
+            last_cache.setdefault(last, [])
+            if not any(p[1] == pid for p in last_cache[last]):
+                last_cache[last].append((key, pid))
+
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(text("""
+                SELECT DISTINCT player_name, player_id
+                FROM lineups
+                WHERE source = 'mlb'
+                  AND player_id IS NOT NULL
+                  AND player_name IS NOT NULL
+            """)).fetchall()
+            for name, pid in rows:
+                add(name, int(pid), overwrite=True)
+
+            rows2 = conn.execute(text("""
+                SELECT DISTINCT home_sp_name, home_sp_id
+                FROM game_probables
+                WHERE home_sp_id IS NOT NULL AND home_sp_name IS NOT NULL
+                UNION
+                SELECT DISTINCT away_sp_name, away_sp_id
+                FROM game_probables
+                WHERE away_sp_id IS NOT NULL AND away_sp_name IS NOT NULL
+            """)).fetchall()
+            for name, pid in rows2:
+                add(name, int(pid), overwrite=False)
+
+    except Exception as e:
+        log(f"  ⚠️  player_id cache build warning: {e}")
+
+    return full_cache, last_cache
+
+
+def lookup_player_id_api(name: str) -> Optional[int]:
+    """
+    Last-resort MLB People search API lookup.
+    Only called for names not in the DB cache — usually <5% of players.
+    """
+    try:
+        r = requests.get(
+            MLB_PEOPLE_SEARCH,
+            params={"names": name, "sportId": 1},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return None
+        people = r.json().get("people", [])
+        if not people:
+            return None
+        # Take the first active MLB player match
+        for p in people:
+            if p.get("active") and p.get("primarySport", {}).get("id") == 1:
+                return int(p["id"])
+        return int(people[0]["id"]) if people else None
+    except Exception:
+        return None
+
+
+def resolve_player_id(
+    name: str,
+    full_cache: dict[str, int],
+    last_cache: dict[str, list],
+    api_cache: dict[str, Optional[int]],
+) -> Optional[int]:
+    """
+    Resolve a player name to MLB ID using three strategies:
+    1. Exact normalized full name match  ("tyler bazzana" -> ID)
+    2. Abbreviated name match ("t bazzana" -> last name lookup -> confirm first initial)
+    3. MLB People API fallback
+    """
+    key = normalize_name(name)
+    if not key:
+        return None
+
+    # 1. Exact full name match
+    if key in full_cache:
+        return full_cache[key]
+
+    # 2. Abbreviated name match — handle "T. Bazzana" -> "t bazzana"
+    parts = key.split()
+    if len(parts) >= 2:
+        first_part = parts[0]   # e.g. "t" (from "T. Bazzana")
+        last_part  = parts[-1]  # e.g. "bazzana"
+        candidates = last_cache.get(last_part, [])
+        if len(first_part) == 1:
+            # Single initial — match against first letter of first name
+            matches = [
+                pid for full_key, pid in candidates
+                if full_key.split()[0].startswith(first_part)
+            ]
+            if len(matches) == 1:
+                full_cache[key] = matches[0]  # cache for next time
+                return matches[0]
+            # Multiple matches with same initial+last — can't resolve safely
+        elif candidates:
+            # Full last name but partial first — try prefix match
+            matches = [
+                pid for full_key, pid in candidates
+                if full_key.split()[0].startswith(first_part)
+            ]
+            if len(matches) == 1:
+                full_cache[key] = matches[0]
+                return matches[0]
+
+    # 3. DB cache (full_cache) re-check after abbreviation attempt
+    if key in full_cache:
+        return full_cache[key]
+
+    # 2. API lookup (cached so each unique name only hits API once)
+    if key not in api_cache:
+        pid = lookup_player_id_api(name)
+        api_cache[key] = pid
+        if pid:
+            full_cache[key] = pid  # warm the cache for next time
+
+    return api_cache.get(key)
 
 
 # =============================================================================
@@ -131,7 +282,6 @@ def clean_name(raw: str) -> str:
 # =============================================================================
 
 def ensure_db_ready() -> None:
-    """Add source column and make player_id nullable if needed."""
     with engine.begin() as conn:
         conn.execute(text("""
             ALTER TABLE lineups
@@ -181,7 +331,6 @@ def get_game_pk(home_team: str, away_team: str, target_date: date) -> Optional[i
 
 
 def upsert_rows(rows: list) -> int:
-    """Insert rows game by game — one failure won't cascade."""
     if not rows:
         return 0
 
@@ -195,6 +344,7 @@ def upsert_rows(rows: list) -> int:
         )
         ON CONFLICT (game_pk, team, batting_order) DO UPDATE SET
             player_name = EXCLUDED.player_name,
+            player_id   = COALESCE(EXCLUDED.player_id, lineups.player_id),
             position    = EXCLUDED.position,
             source      = CASE
                             WHEN lineups.source = 'mlb' THEN 'mlb'
@@ -204,7 +354,6 @@ def upsert_rows(rows: list) -> int:
         WHERE lineups.source != 'mlb'
     """)
 
-    # Group by game_pk so each game is its own transaction
     by_game: dict = {}
     for r in rows:
         by_game.setdefault(r["game_pk"], []).append(r)
@@ -215,7 +364,9 @@ def upsert_rows(rows: list) -> int:
             with engine.begin() as conn:
                 conn.execute(sql, game_rows)
             inserted += len(game_rows)
-            log(f"  ✅ {game_rows[0]['team']}/{game_rows[-1]['team']} ({game_pk}): {len(game_rows)} rows")
+            resolved = sum(1 for r in game_rows if r["player_id"] is not None)
+            teams = f"{game_rows[0]['team']}/{game_rows[-1]['team']}"
+            log(f"  ✅ {teams} ({game_pk}): {len(game_rows)} rows | {resolved} IDs resolved")
         except Exception as e:
             log(f"  ⚠️  game {game_pk} failed: {e}")
 
@@ -246,7 +397,13 @@ def norm_team(name: str) -> Optional[str]:
     return None
 
 
-def parse_lineups(html: str, target_date: date) -> list:
+def parse_lineups(
+    html: str,
+    target_date: date,
+    full_cache: dict[str, int],
+    last_cache: dict[str, list],
+    api_cache: dict[str, Optional[int]],
+) -> list:
     soup = BeautifulSoup(html, "html.parser")
     boxes = soup.select(".lineup__box")
     log(f"  Found {len(boxes)} lineup boxes")
@@ -254,17 +411,22 @@ def parse_lineups(html: str, target_date: date) -> list:
     all_rows = []
     for box in boxes:
         try:
-            rows = _parse_box(box, target_date)
+            rows = _parse_box(box, target_date, full_cache, last_cache, api_cache)
             all_rows.extend(rows)
         except Exception as e:
             log(f"  ⚠️  Box parse error: {e}")
     return all_rows
 
 
-def _parse_box(box, target_date: date) -> list:
+def _parse_box(
+    box,
+    target_date: date,
+    full_cache: dict[str, int],
+    last_cache: dict[str, list],
+    api_cache: dict[str, Optional[int]],
+) -> list:
     rows = []
 
-    # Team names
     team_els = box.select(".lineup__team")
     if len(team_els) < 2:
         return []
@@ -283,7 +445,6 @@ def _parse_box(box, target_date: date) -> list:
         log(f"  ⚠️  No game_pk: {away_abbr} @ {home_abbr}")
         return []
 
-    # Two batting order lists — first = away, second = home
     player_lists = box.select(".lineup__list")
     if len(player_lists) < 2:
         return []
@@ -292,13 +453,11 @@ def _parse_box(box, target_date: date) -> list:
         if side_idx >= len(player_lists):
             continue
 
-        batter_els  = player_lists[side_idx].select("li")
+        batter_els    = player_lists[side_idx].select("li")
         batting_order = 0
 
         for el in batter_els:
             raw = el.get_text(strip=True)
-
-            # ── FILTER non-batter rows BEFORE assigning order ──
             if should_skip(raw):
                 continue
 
@@ -306,18 +465,20 @@ def _parse_box(box, target_date: date) -> list:
             if batting_order > 9:
                 break
 
-            # Extract position from nested span
             position = None
             pos_el   = el.select_one(".lineup__pos")
             if pos_el:
-                position   = pos_el.get_text(strip=True)
+                position    = pos_el.get_text(strip=True)
                 player_name = clean_name(raw.replace(pos_el.get_text(strip=True), ""))
             else:
                 player_name = clean_name(raw)
 
             if not player_name or len(player_name) < 2:
-                batting_order -= 1  # don't count empty rows
+                batting_order -= 1
                 continue
+
+            # ── Resolve player ID from cache ──────────────────────────
+            player_id = resolve_player_id(player_name, full_cache, last_cache, api_cache)
 
             rows.append({
                 "game_pk":       game_pk,
@@ -325,7 +486,7 @@ def _parse_box(box, target_date: date) -> list:
                 "team":          team_abbr,
                 "side":          side,
                 "batting_order": batting_order,
-                "player_id":     None,
+                "player_id":     player_id,
                 "player_name":   player_name,
                 "position":      position,
             })
@@ -349,6 +510,12 @@ def main() -> None:
     except Exception as e:
         log(f"  ⚠️  DB setup warning (may already exist): {e}")
 
+    # Build player ID cache from existing DB data — no API calls needed
+    log("\nBuilding player ID cache from DB...")
+    full_cache, last_cache = build_player_id_cache()
+    api_cache: dict[str, Optional[int]] = {}
+    log(f"  Cached {len(full_cache)} player name\u2192ID mappings")
+
     log("\nFetching RotoWire lineup page...")
     html = fetch_page()
     if not html:
@@ -360,21 +527,26 @@ def main() -> None:
         log(f"  Official MLB lineups exist for {len(official_pks)} games — will be preserved")
 
     log("\nParsing lineups...")
-    rows = parse_lineups(html, today)
+    rows = parse_lineups(html, today, full_cache, last_cache, api_cache)
 
     if not rows:
         log("⚠️  No lineup rows parsed.")
         return
 
-    # Skip games with official lineups
     if official_pks:
         before = len(rows)
         rows   = [r for r in rows if r["game_pk"] not in official_pks]
         if before - len(rows):
             log(f"  Skipped {before - len(rows)} rows (official lineups exist)")
 
-    games = {r["game_pk"] for r in rows}
-    log(f"  Parsed {len(rows)} batter rows across {len(games)} games\n")
+    resolved   = sum(1 for r in rows if r["player_id"] is not None)
+    unresolved = len(rows) - resolved
+    games      = {r["game_pk"] for r in rows}
+    log(f"  Parsed {len(rows)} batter rows across {len(games)} games")
+    log(f"  Player IDs resolved: {resolved}/{len(rows)} ({100*resolved//max(len(rows),1)}%)")
+    if unresolved:
+        missing_names = [r["player_name"] for r in rows if r["player_id"] is None]
+        log(f"  Unresolved names: {missing_names[:10]}{'...' if len(missing_names)>10 else ''}")
 
     inserted = upsert_rows(rows)
     log(f"\n✅ Upserted {inserted} RotoWire lineup rows for {today}")

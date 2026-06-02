@@ -5,7 +5,7 @@ Single script that does three jobs in order:
 
   1. EVALUATE yesterday's picks against actual results
   2. SAVE today's predictions as picks to evaluate tomorrow
-  3. EXPORT full picks history to Excel with color coding
+  3. EXPORT full picks history to Excel with color coding + charts
 
 Excel file saved to: reports/picks_tracker.xlsx
 """
@@ -15,11 +15,13 @@ import os
 from datetime import date, timedelta
 from pathlib import Path
 
+import pandas as pd
 import psycopg2
 from psycopg2.extras import execute_values
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.chart import BarChart, LineChart, Reference
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if os.getenv("DYNO") is None:
@@ -41,20 +43,15 @@ REPORTS_DIR = Path(PROJECT_ROOT) / "reports"
 EXCEL_PATH  = REPORTS_DIR / "picks_tracker.xlsx"
 
 # Colors
-GREEN_FILL  = "C6EFCE"
-GREEN_FONT  = "276221"
-RED_FILL    = "FFC7CE"
-RED_FONT    = "9C0006"
-YELLOW_FILL = "FFEB9C"
-YELLOW_FONT = "9C5700"
-BLUE_FILL   = "DEEAF1"
-BLUE_FONT   = "1F4E79"
-GRAY_FILL   = "F2F2F2"
-DARK_HEADER = "1F4E79"
-WHITE       = "FFFFFF"
-LIGHT_GREEN = "EAF3DE"
-LIGHT_RED   = "FCEBEB"
-LIGHT_GRAY  = "F9F9F9"
+GREEN_FILL  = "C6EFCE"; GREEN_FONT  = "276221"
+RED_FILL    = "FFC7CE"; RED_FONT    = "9C0006"
+YELLOW_FILL = "FFEB9C"; YELLOW_FONT = "9C5700"
+BLUE_FILL   = "DEEAF1"; BLUE_FONT   = "1F4E79"
+GRAY_FILL   = "F2F2F2"; DARK_HEADER = "1F4E79"
+WHITE       = "FFFFFF"; LIGHT_GREEN = "EAF3DE"
+LIGHT_RED   = "FCEBEB"; LIGHT_GRAY  = "F9F9F9"
+NAVY        = "1B2A4A"; STEEL       = "4A6FA5"
+MID         = "2C3E50"; ACCENT      = "F0A500"
 
 
 # ---------------------------------------------------------------------------
@@ -137,45 +134,62 @@ def header_cell(cell, text, size=10):
 
 
 def win_prob_fill(prob):
-    """Color win prob cell: green >60%, yellow 50-60%, red <50%"""
-    if prob is None:
-        return PatternFill("solid", fgColor=GRAY_FILL)
-    if prob >= 0.60:
-        return PatternFill("solid", fgColor=GREEN_FILL)
-    if prob >= 0.50:
-        return PatternFill("solid", fgColor=YELLOW_FILL)
+    if prob is None:   return PatternFill("solid", fgColor=GRAY_FILL)
+    if prob >= 0.60:   return PatternFill("solid", fgColor=GREEN_FILL)
+    if prob >= 0.50:   return PatternFill("solid", fgColor=YELLOW_FILL)
     return PatternFill("solid", fgColor=RED_FILL)
 
 
 def win_prob_font(prob):
-    if prob is None:
-        return Font(name="Arial", size=10)
-    if prob >= 0.60:
-        return Font(name="Arial", size=10, color=GREEN_FONT, bold=True)
-    if prob >= 0.50:
-        return Font(name="Arial", size=10, color=YELLOW_FONT, bold=True)
+    if prob is None:   return Font(name="Arial", size=10)
+    if prob >= 0.60:   return Font(name="Arial", size=10, color=GREEN_FONT, bold=True)
+    if prob >= 0.50:   return Font(name="Arial", size=10, color=YELLOW_FONT, bold=True)
     return Font(name="Arial", size=10, color=RED_FONT, bold=True)
 
 
 def pct_fill(pct_val):
-    """Color percentage cells in summary sheet"""
-    if pct_val >= 57:
-        return PatternFill("solid", fgColor=GREEN_FILL)
-    if pct_val >= 52.4:
-        return PatternFill("solid", fgColor=YELLOW_FILL)
+    if pct_val >= 57:    return PatternFill("solid", fgColor=GREEN_FILL)
+    if pct_val >= 52.4:  return PatternFill("solid", fgColor=YELLOW_FILL)
     return PatternFill("solid", fgColor=RED_FILL)
 
 
 def pct_font(pct_val):
-    if pct_val >= 57:
-        return Font(name="Arial", size=10, color=GREEN_FONT, bold=True)
-    if pct_val >= 52.4:
-        return Font(name="Arial", size=10, color=YELLOW_FONT, bold=True)
+    if pct_val >= 57:    return Font(name="Arial", size=10, color=GREEN_FONT, bold=True)
+    if pct_val >= 52.4:  return Font(name="Arial", size=10, color=YELLOW_FONT, bold=True)
     return Font(name="Arial", size=10, color=RED_FONT, bold=True)
 
 
+def hdr(ws, cell_ref, val, bg=NAVY, fg=WHITE, bold=True, size=10, wrap=False, center=True):
+    c = ws[cell_ref]
+    c.value = val
+    c.font  = Font(name="Arial", bold=bold, color=fg, size=size)
+    c.fill  = PatternFill("solid", start_color=bg)
+    c.alignment = Alignment(
+        horizontal="center" if center else "left",
+        vertical="center", wrap_text=wrap
+    )
+
+
+def scell(ws, ref, val, bold=False, bg=None, fg="000000", size=10, fmt=None, center=False, italic=False):
+    c = ws[ref]
+    c.value = val
+    c.font  = Font(name="Arial", bold=bold, color=fg, size=size, italic=italic)
+    if bg:
+        c.fill = PatternFill("solid", start_color=bg)
+    c.alignment = Alignment(horizontal="center" if center else "left", vertical="center")
+    if fmt:
+        c.number_format = fmt
+
+
+def thin_border_block(ws, min_row, max_row, min_col, max_col):
+    thin = Side(style="thin", color="BDC3C7")
+    for r in range(min_row, max_row + 1):
+        for c in range(min_col, max_col + 1):
+            ws.cell(r, c).border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+
 # ---------------------------------------------------------------------------
-# Evaluation logic — PASS picks always return None (not graded)
+# Evaluation logic
 # ---------------------------------------------------------------------------
 
 def eval_ml(ml_pick, home_team, away_team, home_score, away_score):
@@ -220,18 +234,7 @@ def eval_ou(ou_pick, home_score, away_score, market_line, pred_total):
     return (ou_pick == "OVER" and actual > line) or (ou_pick == "UNDER" and actual < line)
 
 
-# ---------------------------------------------------------------------------
-# Predicted score helper
-# ---------------------------------------------------------------------------
-
 def predicted_scores(home_win_prob, pred_run_diff, pred_total_runs):
-    """
-    Back-calculate predicted home/away scores from model outputs.
-    pred_total = home + away
-    pred_run_diff = home - away
-    → home = (total + diff) / 2
-    → away = (total - diff) / 2
-    """
     if pred_total_runs is None or pred_run_diff is None:
         return None, None
     home = (pred_total_runs + pred_run_diff) / 2
@@ -418,7 +421,7 @@ def save_today_picks(cur):
 
 
 # ---------------------------------------------------------------------------
-# Step 3: Export to Excel
+# Step 3: Export to Excel  (All Picks + Summary + Charts & Trends)
 # ---------------------------------------------------------------------------
 
 def export_excel(cur):
@@ -450,22 +453,19 @@ def export_excel(cur):
     thin = Side(style="thin", color="E0E0E0")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    # ── Sheet 1: All Picks ──────────────────────────────────────────────────
+    # ── Sheet 1: All Picks ──────────────────────────────────────────
     ws = wb.active
     ws.title = "All Picks"
 
     headers = [
         "Date", "Matchup", "Away SP", "Home SP",
-        "ML Pick", "Win Prob",
-        "Pred Score",       # new: away-home predicted
-        "Actual Score",     # new: away-home actual
+        "ML Pick", "Win Prob", "Pred Score", "Actual Score",
         "RL Pick", "Run Diff",
         "O/U Pick", "Model Total", "Vegas Line",
         "ML ✓", "RL ✓", "O/U ✓",
     ]
     for col, h in enumerate(headers, 1):
         header_cell(ws.cell(row=1, column=col), h)
-
     ws.row_dimensions[1].height = 32
 
     for row_idx, r in enumerate(rows, 2):
@@ -478,33 +478,19 @@ def export_excel(cur):
          ml_correct, runline_correct, ou_correct,
          evaluated) = r
 
-        # Predicted score
         pred_home, pred_away = predicted_scores(home_win_prob, pred_run_diff, pred_total_runs)
-        pred_score_str = f"{pred_away}-{pred_home}" if pred_home is not None else "—"
-
-        # Actual score
+        pred_score_str  = f"{pred_away}-{pred_home}" if pred_home is not None else "—"
         actual_score_str = f"{away_score}-{home_score}" if home_score is not None and away_score is not None else "—"
-
         matchup  = f"{away_team} @ {home_team}"
         win_prob = f"{round(home_win_prob * 100, 1)}%" if home_win_prob is not None else "—"
 
-        # Row background — light green if ML correct, light red if wrong, white if pending
-        if evaluated and ml_correct is True:
-            row_bg = LIGHT_GREEN
-        elif evaluated and ml_correct is False:
-            row_bg = LIGHT_RED
-        else:
-            row_bg = WHITE if row_idx % 2 == 0 else LIGHT_GRAY
+        if evaluated and ml_correct is True:    row_bg = LIGHT_GREEN
+        elif evaluated and ml_correct is False: row_bg = LIGHT_RED
+        else: row_bg = WHITE if row_idx % 2 == 0 else LIGHT_GRAY
 
         values = [
-            str(pick_date),
-            matchup,
-            away_sp or "TBD",
-            home_sp or "TBD",
-            ml_pick or "—",
-            win_prob,
-            pred_score_str,
-            actual_score_str,
+            str(pick_date), matchup, away_sp or "TBD", home_sp or "TBD",
+            ml_pick or "—", win_prob, pred_score_str, actual_score_str,
             runline_pick or "—",
             round(pred_run_diff, 2)     if pred_run_diff     is not None else "—",
             ou_pick or "—",
@@ -516,47 +502,42 @@ def export_excel(cur):
         ]
 
         for col, val in enumerate(values, 1):
-            cell = ws.cell(row=row_idx, column=col, value=val)
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border    = border
-            cell.fill      = PatternFill("solid", fgColor=row_bg)
-            cell.font      = Font(name="Arial", size=10)
-
-            # Special formatting per column
-            if col == 6:  # Win prob
-                cell.fill = win_prob_fill(home_win_prob)
-                cell.font = win_prob_font(home_win_prob)
-            elif col == 14:  # ML correct
-                cell.fill = result_fill(ml_correct) if evaluated else PatternFill("solid", fgColor=GRAY_FILL)
-                cell.font = result_font(ml_correct)  if evaluated else Font(name="Arial", size=10)
-            elif col == 15:  # RL correct
-                cell.fill = result_fill(runline_correct) if evaluated else PatternFill("solid", fgColor=GRAY_FILL)
-                cell.font = result_font(runline_correct)  if evaluated else Font(name="Arial", size=10)
-            elif col == 16:  # O/U correct
-                cell.fill = result_fill(ou_correct) if evaluated else PatternFill("solid", fgColor=GRAY_FILL)
-                cell.font = result_font(ou_correct)  if evaluated else Font(name="Arial", size=10)
-            elif col == 13:  # Vegas line — blue tint
-                cell.fill = PatternFill("solid", fgColor=BLUE_FILL)
-                cell.font = Font(name="Arial", size=10, color=BLUE_FONT)
+            c = ws.cell(row=row_idx, column=col, value=val)
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.border    = border
+            c.fill      = PatternFill("solid", fgColor=row_bg)
+            c.font      = Font(name="Arial", size=10)
+            if col == 6:
+                c.fill = win_prob_fill(home_win_prob)
+                c.font = win_prob_font(home_win_prob)
+            elif col == 14:
+                c.fill = result_fill(ml_correct) if evaluated else PatternFill("solid", fgColor=GRAY_FILL)
+                c.font = result_font(ml_correct)  if evaluated else Font(name="Arial", size=10)
+            elif col == 15:
+                c.fill = result_fill(runline_correct) if evaluated else PatternFill("solid", fgColor=GRAY_FILL)
+                c.font = result_font(runline_correct)  if evaluated else Font(name="Arial", size=10)
+            elif col == 16:
+                c.fill = result_fill(ou_correct) if evaluated else PatternFill("solid", fgColor=GRAY_FILL)
+                c.font = result_font(ou_correct)  if evaluated else Font(name="Arial", size=10)
+            elif col == 13:
+                c.fill = PatternFill("solid", fgColor=BLUE_FILL)
+                c.font = Font(name="Arial", size=10, color=BLUE_FONT)
 
     widths = [12, 20, 18, 18, 12, 10, 12, 12, 14, 10, 10, 12, 11, 8, 8, 8]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
-
     ws.freeze_panes = "E2"
 
-    # ── Sheet 2: Summary ────────────────────────────────────────────────────
+    # ── Sheet 2: Summary ────────────────────────────────────────────
     ws2 = wb.create_sheet("Summary")
     ws2.sheet_view.showGridLines = False
 
-    # Title
     ws2["B2"] = "MLB Model — Season Summary"
     ws2["B2"].font      = Font(bold=True, size=16, name="Arial", color=DARK_HEADER)
     ws2["B2"].alignment = Alignment(vertical="center")
     ws2.row_dimensions[2].height = 30
     ws2.merge_cells("B2:H2")
 
-    # Season totals header
     season_headers = ["Metric", "Wins", "Total", "Win %", "Edge", "Status"]
     for col, h in enumerate(season_headers, 2):
         header_cell(ws2.cell(row=4, column=col), h)
@@ -584,45 +565,34 @@ def export_excel(cur):
         for row_i, (label, wins, total) in enumerate(metrics, 5):
             pct_val  = round(wins / total * 100, 1) if total else 0
             edge_val = round(pct_val - 52.4, 1)
-            status   = "Above break-even ✓" if edge_val >= 0 else "Below break-even ✗"
 
-            row_bg = GREEN_FILL if edge_val >= 0 else RED_FILL
-
-            cells_vals = [label, wins, total, f"{pct_val}%", f"{'+' if edge_val >= 0 else ''}{edge_val}%", status]
+            cells_vals = [label, wins, total, f"{pct_val}%", f"{'+' if edge_val >= 0 else ''}{edge_val}%",
+                          "Above break-even ✓" if edge_val >= 0 else "Below break-even ✗"]
             for col_i, val in enumerate(cells_vals, 2):
-                cell = ws2.cell(row=row_i, column=col_i, value=val)
-                cell.font      = Font(name="Arial", size=11, bold=(col_i == 2))
-                cell.alignment = Alignment(horizontal="center" if col_i > 2 else "left", vertical="center")
-                cell.border    = Border(
-                    left=Side(style="thin", color="DDDDDD"),
-                    right=Side(style="thin", color="DDDDDD"),
-                    top=Side(style="thin", color="DDDDDD"),
-                    bottom=Side(style="thin", color="DDDDDD"),
+                c = ws2.cell(row=row_i, column=col_i, value=val)
+                c.font      = Font(name="Arial", size=11, bold=(col_i == 2))
+                c.alignment = Alignment(horizontal="center" if col_i > 2 else "left", vertical="center")
+                c.border    = Border(
+                    left=Side(style="thin", color="DDDDDD"), right=Side(style="thin", color="DDDDDD"),
+                    top=Side(style="thin", color="DDDDDD"),  bottom=Side(style="thin", color="DDDDDD"),
                 )
-                # Color the pct and edge columns
-                if col_i == 5:  # Win %
-                    cell.fill = pct_fill(pct_val)
-                    cell.font = pct_font(pct_val)
-                elif col_i == 6:  # Edge
-                    cell.fill = PatternFill("solid", fgColor=GREEN_FILL if edge_val >= 0 else RED_FILL)
-                    cell.font = Font(name="Arial", size=11, bold=True,
-                                     color=GREEN_FONT if edge_val >= 0 else RED_FONT)
-                elif col_i == 7:  # Status
-                    cell.fill = PatternFill("solid", fgColor=GREEN_FILL if edge_val >= 0 else RED_FILL)
-                    cell.font = Font(name="Arial", size=10,
-                                     color=GREEN_FONT if edge_val >= 0 else RED_FONT)
+                if col_i == 5:
+                    c.fill = pct_fill(pct_val); c.font = pct_font(pct_val)
+                elif col_i == 6:
+                    c.fill = PatternFill("solid", fgColor=GREEN_FILL if edge_val >= 0 else RED_FILL)
+                    c.font = Font(name="Arial", size=11, bold=True, color=GREEN_FONT if edge_val >= 0 else RED_FONT)
+                elif col_i == 7:
+                    c.fill = PatternFill("solid", fgColor=GREEN_FILL if edge_val >= 0 else RED_FILL)
+                    c.font = Font(name="Arial", size=10, color=GREEN_FONT if edge_val >= 0 else RED_FONT)
                 else:
-                    cell.fill = PatternFill("solid", fgColor=LIGHT_GRAY)
-
+                    c.fill = PatternFill("solid", fgColor=LIGHT_GRAY)
             ws2.row_dimensions[row_i].height = 22
 
-    # Break-even note
     note_cell = ws2.cell(row=9, column=2, value="Break-even threshold: 52.4% | Sharp target: 57%+")
     note_cell.font      = Font(name="Arial", size=10, italic=True, color="888888")
     note_cell.alignment = Alignment(horizontal="left")
     ws2.merge_cells("B9:H9")
 
-    # Daily breakdown header
     ws2.cell(row=11, column=2, value="Daily Breakdown").font = Font(bold=True, size=13, name="Arial", color=DARK_HEADER)
     ws2.row_dimensions[11].height = 24
 
@@ -632,8 +602,7 @@ def export_excel(cur):
     ws2.row_dimensions[12].height = 22
 
     cur.execute(f"""
-        SELECT
-            pick_date,
+        SELECT pick_date,
             COUNT(*) FILTER (WHERE ml_correct IS NOT NULL),
             COALESCE(SUM(CASE WHEN ml_correct THEN 1 ELSE 0 END), 0),
             COUNT(*) FILTER (WHERE runline_correct IS NOT NULL),
@@ -653,45 +622,261 @@ def export_excel(cur):
         rp = round(rl_w / rl_tot * 100, 1) if rl_tot else 0
         op = round(ou_w / ou_tot * 100, 1) if ou_tot else 0
 
-        vals = [
-            str(pick_date),
-            int(ml_w), int(ml_tot), f"{mp}%" if ml_tot else "—",
-            int(rl_w), int(rl_tot), f"{rp}%" if rl_tot else "—",
-            int(ou_w), int(ou_tot), f"{op}%" if ou_tot else "—",
-        ]
+        vals = [str(pick_date), int(ml_w), int(ml_tot), f"{mp}%" if ml_tot else "—",
+                int(rl_w), int(rl_tot), f"{rp}%" if rl_tot else "—",
+                int(ou_w), int(ou_tot), f"{op}%" if ou_tot else "—"]
         bg = LIGHT_GRAY if row_idx % 2 == 0 else WHITE
         for col_i, val in enumerate(vals, 2):
-            cell = ws2.cell(row=row_idx, column=col_i, value=val)
-            cell.font      = Font(name="Arial", size=10)
-            cell.alignment = Alignment(horizontal="center" if col_i > 2 else "left", vertical="center")
-            cell.fill      = PatternFill("solid", fgColor=bg)
-            cell.border    = Border(
-                bottom=Side(style="thin", color="EEEEEE"),
-                left=Side(style="thin", color="EEEEEE"),
-                right=Side(style="thin", color="EEEEEE"),
-            )
-            # Color the pct columns
-            if col_i == 5 and ml_tot:   # ML %
-                cell.fill = pct_fill(mp)
-                cell.font = pct_font(mp)
-            elif col_i == 8 and rl_tot: # RL %
-                cell.fill = pct_fill(rp)
-                cell.font = pct_font(rp)
-            elif col_i == 11 and ou_tot: # O/U %
-                cell.fill = pct_fill(op)
-                cell.font = pct_font(op)
-
+            c = ws2.cell(row=row_idx, column=col_i, value=val)
+            c.font      = Font(name="Arial", size=10)
+            c.alignment = Alignment(horizontal="center" if col_i > 2 else "left", vertical="center")
+            c.fill      = PatternFill("solid", fgColor=bg)
+            c.border    = Border(bottom=Side(style="thin", color="EEEEEE"),
+                                 left=Side(style="thin", color="EEEEEE"),
+                                 right=Side(style="thin", color="EEEEEE"))
+            if col_i == 5 and ml_tot:    c.fill = pct_fill(mp);  c.font = pct_font(mp)
+            elif col_i == 8 and rl_tot:  c.fill = pct_fill(rp);  c.font = pct_font(rp)
+            elif col_i == 11 and ou_tot: c.fill = pct_fill(op);  c.font = pct_font(op)
         ws2.row_dimensions[row_idx].height = 20
 
-    # Column widths for summary sheet
-    summary_widths = {"B": 16, "C": 8, "D": 8, "E": 10, "F": 10, "G": 8, "H": 8, "I": 8, "J": 8, "K": 10}
-    for col, w in summary_widths.items():
+    for col, w in {"B":16,"C":8,"D":8,"E":10,"F":10,"G":8,"H":8,"I":8,"J":8,"K":10}.items():
         ws2.column_dimensions[col].width = w
-
     ws2.freeze_panes = "B13"
+
+    # ── Sheet 3: Charts & Trends ────────────────────────────────────
+    _add_charts_sheet(wb, daily)
 
     wb.save(EXCEL_PATH)
     print(f"  ✅ Excel saved to: {EXCEL_PATH}\n")
+
+
+def _add_charts_sheet(wb: Workbook, daily_db_rows: list) -> None:
+    """
+    Build Charts & Trends sheet from daily_picks data.
+    daily_db_rows: [(pick_date, ml_tot, ml_w, rl_tot, rl_w, ou_tot, ou_w), ...]
+    ordered DESC by date — we reverse to get chronological order.
+    """
+    ws = wb.create_sheet("Charts & Trends")
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = "27AE60"
+
+    # ── Title ────────────────────────────────────────────────────────
+    ws.merge_cells("A1:Z1")
+    hdr(ws, "A1", "MLB MODEL — PERFORMANCE CHARTS & TRENDS", NAVY, WHITE, size=13)
+    ws.row_dimensions[1].height = 28
+
+    if not daily_db_rows:
+        ws.merge_cells("A2:Z2")
+        hdr(ws, "A2", "No evaluated picks yet — charts will populate after first results.", MID, WHITE, size=10)
+        return
+
+    # Reverse to chronological order
+    daily_chron = list(reversed(daily_db_rows))
+
+    # ── Build daily stats ─────────────────────────────────────────────
+    records = []
+    cum_ml_w=0; cum_ml_t=0
+    cum_rl_w=0; cum_rl_t=0
+    cum_ou_w=0; cum_ou_t=0
+
+    for pick_date, ml_tot, ml_w, rl_tot, rl_w, ou_tot, ou_w in daily_chron:
+        ml_pct = round(ml_w/ml_tot, 4) if ml_tot else None
+        rl_pct = round(rl_w/rl_tot, 4) if rl_tot else None
+        ou_pct = round(ou_w/ou_tot, 4) if ou_tot else None
+        cum_ml_w += ml_w;  cum_ml_t += ml_tot
+        cum_rl_w += rl_w;  cum_rl_t += rl_tot
+        cum_ou_w += ou_w;  cum_ou_t += ou_tot
+        records.append({
+            "date":    str(pick_date.strftime("%m/%d") if hasattr(pick_date, "strftime") else str(pick_date)[:5]),
+            "ml_pct":  ml_pct,
+            "rl_pct":  rl_pct,
+            "ou_pct":  ou_pct,
+            "ml_cum":  round(cum_ml_w/cum_ml_t, 4) if cum_ml_t >= 30 else None,
+            "rl_cum":  round(cum_rl_w/cum_rl_t, 4) if cum_rl_t >= 30 else None,
+            "ou_cum":  round(cum_ou_w/cum_ou_t, 4) if cum_ou_t >= 20 else None,
+        })
+
+    df = pd.DataFrame(records)
+    df["ml_roll7"] = pd.Series(df["ml_pct"]).rolling(7, min_periods=3).mean().round(4)
+    df["rl_roll7"] = pd.Series(df["rl_pct"]).rolling(7, min_periods=3).mean().round(4)
+    df["ou_roll7"] = pd.Series(df["ou_pct"]).rolling(7, min_periods=3).mean().round(4)
+    n = len(df)
+
+    # ── Season summary stats header ───────────────────────────────────
+    ml_tot_s = sum(r[1] for r in daily_chron)
+    ml_w_s   = sum(r[2] for r in daily_chron)
+    rl_tot_s = sum(r[3] for r in daily_chron)
+    rl_w_s   = sum(r[4] for r in daily_chron)
+    ou_tot_s = sum(r[5] for r in daily_chron)
+    ou_w_s   = sum(r[6] for r in daily_chron)
+
+    ml_pct_s = ml_w_s/ml_tot_s if ml_tot_s else 0
+    rl_pct_s = rl_w_s/rl_tot_s if rl_tot_s else 0
+    ou_pct_s = ou_w_s/ou_tot_s if ou_tot_s else 0
+
+    ws.merge_cells("A2:Z2")
+    hdr(ws, "A2",
+        f"Season 2026  |  ML: {ml_w_s}-{ml_tot_s-ml_w_s} ({ml_pct_s:.1%})  |  "
+        f"RL: {rl_w_s}-{rl_tot_s-rl_w_s} ({rl_pct_s:.1%})  |  "
+        f"O/U: {ou_w_s}-{ou_tot_s-ou_w_s} ({ou_pct_s:.1%})  |  "
+        f"Break-even: 52.4%  |  Sharp: 57%+",
+        MID, WHITE, bold=False, size=10)
+    ws.row_dimensions[2].height = 20
+
+    # ── Data table 1: Rolling (cols A-E) ─────────────────────────────
+    roll_hdrs = ["Date","ML 7d","RL 7d","O/U 7d","B-Even"]
+    for i, h in enumerate(roll_hdrs):
+        c = ws.cell(4, i+1, h)
+        c.font = Font(name="Arial", bold=True, size=8, color=WHITE)
+        c.fill = PatternFill("solid", start_color=NAVY)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[get_column_letter(i+1)].width = 8
+
+    for i, row in df.iterrows():
+        r = i + 5
+        ws.row_dimensions[r].height = 13
+        ws.cell(r,1).value = row["date"]
+        ws.cell(r,1).font  = Font(name="Arial", size=7)
+        ws.cell(r,1).alignment = Alignment(horizontal="center")
+        for j, col in enumerate(["ml_roll7","rl_roll7","ou_roll7"], start=2):
+            c = ws.cell(r, j)
+            c.value = row[col]
+            c.number_format = "0%"
+            c.font = Font(name="Arial", size=7)
+            c.alignment = Alignment(horizontal="center")
+        ws.cell(r,5).value = 0.524
+        ws.cell(r,5).number_format = "0%"
+        ws.cell(r,5).font = Font(name="Arial", size=7)
+
+    # ── Data table 2: Cumulative (cols G-K) ──────────────────────────
+    cum_hdrs = ["Date","ML Cum","RL Cum","O/U Cum","B-Even"]
+    for i, h in enumerate(cum_hdrs):
+        c = ws.cell(4, i+7, h)
+        c.font = Font(name="Arial", bold=True, size=8, color=WHITE)
+        c.fill = PatternFill("solid", start_color=NAVY)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[get_column_letter(i+7)].width = 8
+
+    for i, row in df.iterrows():
+        r = i + 5
+        ws.cell(r,7).value = row["date"]
+        ws.cell(r,7).font  = Font(name="Arial", size=7)
+        ws.cell(r,7).alignment = Alignment(horizontal="center")
+        for j, col in enumerate(["ml_cum","rl_cum","ou_cum"], start=1):
+            c = ws.cell(r, 7+j)
+            c.value = row[col]
+            c.number_format = "0%"
+            c.font = Font(name="Arial", size=7)
+            c.alignment = Alignment(horizontal="center")
+        ws.cell(r,11).value = 0.524
+        ws.cell(r,11).number_format = "0%"
+        ws.cell(r,11).font = Font(name="Arial", size=7)
+
+    # ── Data table 3: Daily ML bars (cols M-N) ───────────────────────
+    for h, col in [("M4","Date"),("N4","ML %")]:
+        c = ws[h]; c.value = col
+        c.font = Font(name="Arial", bold=True, size=8, color=WHITE)
+        c.fill = PatternFill("solid", start_color=NAVY)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+    ws.column_dimensions["M"].width = 8
+    ws.column_dimensions["N"].width = 8
+
+    for i, row in df.iterrows():
+        r = i + 5
+        ws.cell(r,13).value = row["date"]
+        ws.cell(r,13).font  = Font(name="Arial", size=7)
+        ws.cell(r,13).alignment = Alignment(horizontal="center")
+        ws.cell(r,14).value = row["ml_pct"]
+        ws.cell(r,14).number_format = "0%"
+        ws.cell(r,14).font = Font(name="Arial", size=7)
+
+    # ── CHART 1: 7-Day Rolling Win Rate ──────────────────────────────
+    chart1 = LineChart()
+    chart1.title = "7-Day Rolling Win Rate"
+    chart1.style = 10
+    chart1.y_axis.numFmt = "0%"
+    chart1.y_axis.scaling.min = 0.25
+    chart1.y_axis.scaling.max = 0.85
+    chart1.y_axis.title = "Win Rate"
+    chart1.legend.position = "b"
+    chart1.width = 20; chart1.height = 11
+
+    for col_idx, color, dash in [(2,"1B2A4A",None),(3,"27AE60",None),(4,"F0A500",None),(5,"E74C3C","dash")]:
+        ref = Reference(ws, min_col=col_idx, min_row=4, max_row=4+n)
+        chart1.add_data(ref, titles_from_data=True)
+        s = chart1.series[-1]
+        s.graphicalProperties.line.solidFill = color
+        s.graphicalProperties.line.width = 18000 if not dash else 12000
+        if dash: s.graphicalProperties.line.dashDot = dash
+        s.smooth = True
+
+    chart1.set_categories(Reference(ws, min_col=1, min_row=5, max_row=4+n))
+    chart1.x_axis.tickLblSkip = max(1, n//8)
+    ws.add_chart(chart1, "A52")
+
+    # ── CHART 2: Cumulative Win Rate ──────────────────────────────────
+    chart2 = LineChart()
+    chart2.title = "Cumulative Win Rate — Season to Date"
+    chart2.style = 10
+    chart2.y_axis.numFmt = "0%"
+    chart2.y_axis.scaling.min = 0.42
+    chart2.y_axis.scaling.max = 0.70
+    chart2.y_axis.title = "Win Rate"
+    chart2.legend.position = "b"
+    chart2.width = 20; chart2.height = 11
+
+    for col_idx, color, dash in [(8,"1B2A4A",None),(9,"27AE60",None),(10,"F0A500",None),(11,"E74C3C","dash")]:
+        ref = Reference(ws, min_col=col_idx, min_row=4, max_row=4+n)
+        chart2.add_data(ref, titles_from_data=True)
+        s = chart2.series[-1]
+        s.graphicalProperties.line.solidFill = color
+        s.graphicalProperties.line.width = 18000 if not dash else 12000
+        if dash: s.graphicalProperties.line.dashDot = dash
+        s.smooth = True
+
+    chart2.set_categories(Reference(ws, min_col=7, min_row=5, max_row=4+n))
+    chart2.x_axis.tickLblSkip = max(1, n//8)
+    ws.add_chart(chart2, "L52")
+
+    # ── CHART 3: Daily ML Win Rate bars ──────────────────────────────
+    chart3 = BarChart()
+    chart3.title = "Daily ML Win Rate"
+    chart3.style = 10; chart3.type = "col"; chart3.grouping = "clustered"
+    chart3.y_axis.numFmt = "0%"
+    chart3.y_axis.scaling.min = 0; chart3.y_axis.scaling.max = 1.0
+    chart3.legend.position = "b"
+    chart3.width = 20; chart3.height = 11
+
+    chart3.add_data(Reference(ws, min_col=14, min_row=4, max_row=4+n), titles_from_data=True)
+    chart3.series[-1].graphicalProperties.solidFill = NAVY
+    chart3.set_categories(Reference(ws, min_col=13, min_row=5, max_row=4+n))
+    chart3.x_axis.tickLblSkip = max(1, n//8)
+    ws.add_chart(chart3, "A70")
+
+    # ── Key insights box ──────────────────────────────────────────────
+    ws.merge_cells("L70:Z70")
+    hdr(ws, "L70", "KEY INSIGHTS", MID, WHITE, size=10)
+    ws.row_dimensions[70].height = 20
+
+    be = 0.524; sharp = 0.570
+    insights = [
+        f"ML: {ml_w_s}-{ml_tot_s-ml_w_s} ({ml_pct_s:.1%}) — {'✅ Above' if ml_pct_s>=be else '❌ Below'} break-even",
+        f"RL: {rl_w_s}-{rl_tot_s-rl_w_s} ({rl_pct_s:.1%}) — {'🎯 Sharp' if rl_pct_s>=sharp else ('✅ Above' if rl_pct_s>=be else '❌ Below')} target",
+        f"O/U: {ou_w_s}-{ou_tot_s-ou_w_s} ({ou_pct_s:.1%}) — {'✅ Above' if ou_pct_s>=be else '❌ Below'} break-even",
+        "Charts update automatically every morning",
+        "Break-even: 52.4% | Sharp target: 57%+",
+        "Lineup features gain weight at ~June 20 retrain",
+    ]
+    for i, note in enumerate(insights):
+        r = 71 + i
+        ws.row_dimensions[r].height = 18
+        ws.merge_cells(f"L{r}:Z{r}")
+        c = ws[f"L{r}"]
+        c.value = note
+        c.font  = Font(name="Arial", size=9,
+                       italic=(i >= 3),
+                       color=GREEN_FONT if "✅" in note or "🎯" in note else (RED_FONT if "❌" in note else "555555"))
+        c.alignment = Alignment(horizontal="left", vertical="center")
 
 
 # ---------------------------------------------------------------------------

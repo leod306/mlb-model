@@ -29,8 +29,11 @@ MLB_TEAMS = [
     "TEX","TOR","WSH"
 ]
 
-OU_WINDOW  = 20   # games for O/U tendency
-ATS_WINDOW = 20   # games for ATS cover rate
+OU_WINDOW      = 20   # games for O/U tendency
+ATS_WINDOW     = 20   # games for ATS cover rate
+SP_ROLL_STARTS = 5    # rolling window for SP ERA
+LEAGUE_AVG_OPS = 0.720
+LEAGUE_AVG_HH  = 0.35
 
 
 # ------------------------------------------------------------------
@@ -91,10 +94,10 @@ def add_rest_days(games):
     home, away = [], []
     for _, r in games.iterrows():
         d  = r.game_date
-        hp = r.home_pitcher_clean
-        ap = r.away_pitcher_clean
-        home.append((d - last.get(hp, d)).days if hp in last else 5)
-        away.append((d - last.get(ap, d)).days if ap in last else 5)
+        hp = r.get("home_pitcher_clean")
+        ap = r.get("away_pitcher_clean")
+        home.append((d - last.get(hp, d)).days if hp and hp in last else 5)
+        away.append((d - last.get(ap, d)).days if ap and ap in last else 5)
         if hp: last[hp] = d
         if ap: last[ap] = d
     games["home_sp_rest_days"] = home
@@ -124,8 +127,8 @@ def add_win_pct(games):
         hist   = games[games.game_date < r.game_date]
         h_hist = hist[hist.home_team == r.home_team]
         a_hist = hist[hist.away_team == r.away_team]
-        h = h_hist.home_win.mean()          if len(h_hist) > 5 else 0.5
-        a = (1 - a_hist.home_win).mean()    if len(a_hist) > 5 else 0.5
+        h = h_hist.home_win.mean()       if len(h_hist) > 5 else 0.5
+        a = (1 - a_hist.home_win).mean() if len(a_hist) > 5 else 0.5
         h_pct.append(h)
         a_pct.append(a)
     games["home_win_pct_home"] = h_pct
@@ -133,12 +136,7 @@ def add_win_pct(games):
     return games
 
 
-def add_ou_tendency(games, ou_line_col="total_runs", window=OU_WINDOW):
-    """
-    For each game compute rolling O/U hit rate for both teams
-    over their last N games using a default line of 8.5.
-    This tells the model whether a team tends to play high or low scoring games.
-    """
+def add_ou_tendency(games, window=OU_WINDOW):
     games = games.sort_values("game_date").copy()
     DEFAULT_LINE = 8.5
 
@@ -152,10 +150,10 @@ def add_ou_tendency(games, ou_line_col="total_runs", window=OU_WINDOW):
         if len(tg) == 0:
             continue
 
-        tg["game_total"]   = tg["home_score"] + tg["away_score"]
-        tg["went_over"]    = (tg["game_total"] > DEFAULT_LINE).astype(float)
-        tg["over_rate"]    = tg["went_over"].shift(1).rolling(window, min_periods=3).mean()
-        tg["last_total"]   = tg["game_total"].shift(1)
+        tg["game_total"] = tg["home_score"] + tg["away_score"]
+        tg["went_over"]  = (tg["game_total"] > DEFAULT_LINE).astype(float)
+        tg["over_rate"]  = tg["went_over"].shift(1).rolling(window, min_periods=3).mean()
+        tg["last_total"] = tg["game_total"].shift(1)
 
         for i in tg.index:
             if games.loc[i, "home_team"] == team:
@@ -169,11 +167,6 @@ def add_ou_tendency(games, ou_line_col="total_runs", window=OU_WINDOW):
 
 
 def add_ats_cover_rate(games, window=ATS_WINDOW):
-    """
-    For each game compute rolling ATS cover rate for both teams
-    over their last N games using -1.5 as the spread.
-    Positive run diff > 1.5 = covered -1.5.
-    """
     games = games.sort_values("game_date").copy()
 
     for col in ["home_ats_cover_rate", "away_ats_cover_rate"]:
@@ -185,7 +178,6 @@ def add_ats_cover_rate(games, window=ATS_WINDOW):
         if len(tg) == 0:
             continue
 
-        # From this team's perspective: did they cover -1.5?
         tg["team_run_diff"] = tg.apply(
             lambda r: (r.home_score - r.away_score) if r.home_team == team
                       else (r.away_score - r.home_score), axis=1
@@ -198,6 +190,60 @@ def add_ats_cover_rate(games, window=ATS_WINDOW):
                 games.loc[i, "home_ats_cover_rate"] = tg.loc[i, "ats_cover_rate"]
             else:
                 games.loc[i, "away_ats_cover_rate"] = tg.loc[i, "ats_cover_rate"]
+
+    return games
+
+
+def add_lineup_features(games):
+    """
+    Pull lineup OPS and hard-hit features from the predictions table.
+    The engine saves these after every run, so coverage grows over time.
+    Falls back to league avg for games without lineup data.
+
+    Joins on game_pk — only games the engine has already run will have
+    real values. Historical games (2024-2025) will get league avg defaults,
+    which is fine since lineup signal in historical data is thin anyway.
+    """
+    print("Loading lineup features from predictions table...")
+    try:
+        pred_cols = pd.read_sql("""
+            SELECT game_pk,
+                   home_lineup_ops_vs_sp,
+                   away_lineup_ops_vs_sp,
+                   home_lineup_hard_hit,
+                   away_lineup_hard_hit
+            FROM predictions
+            WHERE home_lineup_ops_vs_sp IS NOT NULL
+              AND home_lineup_ops_vs_sp != 0.720
+        """, engine)
+
+        if pred_cols.empty:
+            print("  ⚠️  No real lineup data in predictions table yet — using league avg")
+            games["home_lineup_ops_vs_sp"] = LEAGUE_AVG_OPS
+            games["away_lineup_ops_vs_sp"] = LEAGUE_AVG_OPS
+            games["home_lineup_hard_hit"]  = LEAGUE_AVG_HH
+            games["away_lineup_hard_hit"]  = LEAGUE_AVG_HH
+            return games
+
+        before = len(games)
+        games = games.merge(pred_cols, on="game_pk", how="left")
+
+        # Fill unmatched rows with league avg
+        games["home_lineup_ops_vs_sp"] = games["home_lineup_ops_vs_sp"].fillna(LEAGUE_AVG_OPS)
+        games["away_lineup_ops_vs_sp"] = games["away_lineup_ops_vs_sp"].fillna(LEAGUE_AVG_OPS)
+        games["home_lineup_hard_hit"]  = games["home_lineup_hard_hit"].fillna(LEAGUE_AVG_HH)
+        games["away_lineup_hard_hit"]  = games["away_lineup_hard_hit"].fillna(LEAGUE_AVG_HH)
+
+        real_coverage = (games["home_lineup_ops_vs_sp"] != LEAGUE_AVG_OPS).sum()
+        print(f"  Lineup coverage: {real_coverage}/{before} games ({real_coverage/before:.1%}) have real BvP scores")
+        print(f"  Remaining {before - real_coverage} games use league avg ({LEAGUE_AVG_OPS})")
+
+    except Exception as e:
+        print(f"  ⚠️  Lineup feature join failed: {e} — using league avg")
+        games["home_lineup_ops_vs_sp"] = LEAGUE_AVG_OPS
+        games["away_lineup_ops_vs_sp"] = LEAGUE_AVG_OPS
+        games["home_lineup_hard_hit"]  = LEAGUE_AVG_HH
+        games["away_lineup_hard_hit"]  = LEAGUE_AVG_HH
 
     return games
 
@@ -223,37 +269,73 @@ def build_training_dataset():
     games["season"]    = games.game_date.dt.year
     games = games.dropna(subset=["home_score", "away_score"])
 
-    # Pitcher columns
-    if "home_pitcher" not in games.columns:
-        games["home_pitcher"] = None
-    if "away_pitcher" not in games.columns:
-        games["away_pitcher"] = None
-
-    games["home_pitcher_clean"] = games["home_pitcher"].apply(clean_name)
-    games["away_pitcher_clean"] = games["away_pitcher"].apply(clean_name)
+    # League average fallbacks
     pitchers["pitcher_name_clean"] = pitchers["pitcher_name"].apply(clean_name)
+    league_era  = float(pitchers["era"].mean())  if not pitchers.empty else 4.20
+    league_whip = float(pitchers["whip"].mean()) if not pitchers.empty else 1.30
+    print(f"League avg ERA={league_era:.2f} WHIP={league_whip:.2f}")
 
-    # Merge pitcher stats
-    home_pitchers = pitchers[["pitcher_name_clean","season","era","whip"]].copy()
-    home_pitchers = home_pitchers.rename(columns={"era":"home_era","whip":"home_whip"})
-    games = games.merge(home_pitchers, how="left",
-                        left_on=["home_pitcher_clean","season"],
-                        right_on=["pitcher_name_clean","season"])
-    games = games.drop(columns=["pitcher_name_clean"], errors="ignore")
+    # ------------------------------------------------------------------
+    # SP ERA — join directly from pitcher_game_log by game_pk + team
+    # ------------------------------------------------------------------
+    print("Computing SP ERA from pitcher_game_log by game_pk + team...")
+    try:
+        sp_log = pd.read_sql("""
+            SELECT game_pk, pitcher_name, team, role,
+                   innings_pitched, er_allowed, hits_allowed, walks
+            FROM pitcher_game_log
+            WHERE role = 'SP'
+        """, engine)
 
-    away_pitchers = pitchers[["pitcher_name_clean","season","era","whip"]].copy()
-    away_pitchers = away_pitchers.rename(columns={"era":"away_era","whip":"away_whip"})
-    games = games.merge(away_pitchers, how="left",
-                        left_on=["away_pitcher_clean","season"],
-                        right_on=["pitcher_name_clean","season"])
-    games = games.drop(columns=["pitcher_name_clean"], errors="ignore")
+        sp_log["pitcher_name_clean"] = sp_log["pitcher_name"].apply(clean_name)
+        sp_log["innings_pitched"]    = pd.to_numeric(sp_log["innings_pitched"], errors="coerce")
+        sp_log["er_allowed"]         = pd.to_numeric(sp_log["er_allowed"],      errors="coerce").fillna(0)
+        sp_log["hits_allowed"]       = pd.to_numeric(sp_log["hits_allowed"],    errors="coerce").fillna(0)
+        sp_log["walks"]              = pd.to_numeric(sp_log["walks"],           errors="coerce").fillna(0)
+        sp_log = sp_log.dropna(subset=["innings_pitched"])
+        sp_log = sp_log.sort_values(["pitcher_name_clean", "game_pk"])
 
-    league_era  = pitchers["era"].mean()
-    league_whip = pitchers["whip"].mean()
-    games["home_era"]  = games["home_era"].fillna(league_era)
-    games["away_era"]  = games["away_era"].fillna(league_era)
-    games["home_whip"] = games["home_whip"].fillna(league_whip)
-    games["away_whip"] = games["away_whip"].fillna(league_whip)
+        g = sp_log.groupby("pitcher_name_clean")
+        sp_log["rolling_ip"] = g["innings_pitched"].transform(
+            lambda x: x.shift(1).rolling(SP_ROLL_STARTS, min_periods=1).sum()
+        )
+        sp_log["rolling_er"] = g["er_allowed"].transform(
+            lambda x: x.shift(1).rolling(SP_ROLL_STARTS, min_periods=1).sum()
+        )
+        sp_log["rolling_h"]  = g["hits_allowed"].transform(
+            lambda x: x.shift(1).rolling(SP_ROLL_STARTS, min_periods=1).sum()
+        )
+        sp_log["rolling_bb"] = g["walks"].transform(
+            lambda x: x.shift(1).rolling(SP_ROLL_STARTS, min_periods=1).sum()
+        )
+
+        sp_log["sp_era"]  = (sp_log["rolling_er"] / sp_log["rolling_ip"].clip(lower=0.1)) * 9
+        sp_log["sp_whip"] = (sp_log["rolling_h"] + sp_log["rolling_bb"]) / sp_log["rolling_ip"].clip(lower=0.1)
+
+        home_sp = sp_log[["game_pk","team","sp_era","sp_whip","pitcher_name_clean"]].copy()
+        home_sp.columns = ["game_pk","home_team","home_era","home_whip","home_pitcher_clean"]
+        games = games.merge(home_sp, on=["game_pk","home_team"], how="left")
+
+        away_sp = sp_log[["game_pk","team","sp_era","sp_whip","pitcher_name_clean"]].copy()
+        away_sp.columns = ["game_pk","away_team","away_era","away_whip","away_pitcher_clean"]
+        games = games.merge(away_sp, on=["game_pk","away_team"], how="left")
+
+        games["home_era"]  = games["home_era"].fillna(league_era)
+        games["away_era"]  = games["away_era"].fillna(league_era)
+        games["home_whip"] = games["home_whip"].fillna(league_whip)
+        games["away_whip"] = games["away_whip"].fillna(league_whip)
+
+        sp_found = (games["home_era"] != league_era).sum()
+        print(f"  Games with real SP ERA: {sp_found}/{len(games)} ({sp_found/len(games):.1%})")
+
+    except Exception as e:
+        print(f"  ⚠️  SP ERA join failed: {e} — using league avg")
+        games["home_era"]           = league_era
+        games["away_era"]           = league_era
+        games["home_whip"]          = league_whip
+        games["away_whip"]          = league_whip
+        games["home_pitcher_clean"] = None
+        games["away_pitcher_clean"] = None
 
     # Targets
     games["run_diff"]   = games.home_score - games.away_score
@@ -264,7 +346,11 @@ def build_training_dataset():
     games["era_diff"]  = games.home_era  - games.away_era
     games["whip_diff"] = games.home_whip - games.away_whip
 
-    print("Adding rolling features...")
+    print(f"\nERA diff stats:")
+    print(f"  std={games['era_diff'].std():.3f}  min={games['era_diff'].min():.2f}  max={games['era_diff'].max():.2f}")
+    print(f"  % of games with |era_diff| > 1.0: {(games['era_diff'].abs() > 1.0).mean():.1%}")
+
+    print("\nAdding rolling features...")
     games = add_rolling_features(games)
 
     print("Adding rest days...")
@@ -281,6 +367,9 @@ def build_training_dataset():
 
     print(f"Adding ATS cover rate (last {ATS_WINDOW} games)...")
     games = add_ats_cover_rate(games)
+
+    print("Adding lineup features from predictions table...")
+    games = add_lineup_features(games)
 
     # Fill defaults
     games = games.fillna({
@@ -302,25 +391,22 @@ def build_training_dataset():
         "away_last_game_total":     8.5,
         "home_ats_cover_rate":      0.5,
         "away_ats_cover_rate":      0.5,
+        "home_lineup_ops_vs_sp":    LEAGUE_AVG_OPS,
+        "away_lineup_ops_vs_sp":    LEAGUE_AVG_OPS,
+        "home_lineup_hard_hit":     LEAGUE_AVG_HH,
+        "away_lineup_hard_hit":     LEAGUE_AVG_HH,
     })
 
-    print(f"Final rows: {len(games)}")
+    print(f"\nFinal rows: {len(games)}")
+    print(f"ERA diff variance: std={games['era_diff'].std():.3f}")
 
-    # Feature check
-    new_cols = [
-        "home_ou_over_rate","away_ou_over_rate",
-        "home_last_game_total","away_last_game_total",
-        "home_ats_cover_rate","away_ats_cover_rate",
-    ]
-    print("\nNew feature stats:")
-    print(games[new_cols].describe().round(3))
+    # Summary of lineup coverage in final dataset
+    lineup_coverage = (games["home_lineup_ops_vs_sp"] != LEAGUE_AVG_OPS).mean()
+    print(f"Lineup coverage in final dataset: {lineup_coverage:.1%}")
 
     out = os.path.join(BASE_DIR, "ml", "training_data.csv")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     games.to_csv(out, index=False)
-
-    print(games[["game_date","home_team","away_team","home_pitcher","away_pitcher"]].head(10))
-    print(games[["home_era","away_era","home_whip","away_whip"]].isna().mean())
     print(f"\nSaved → {out}")
 
 
