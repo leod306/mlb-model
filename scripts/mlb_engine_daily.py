@@ -45,12 +45,26 @@ OU_WINDOW          = 20
 ATS_WINDOW         = 20
 DEFAULT_TOTAL_LINE = float(os.getenv("DEFAULT_TOTAL_LINE", "8.5"))
 
-# Calibration offset — model predicts ~1.2 runs too high vs 2026 actuals
-TOTAL_CALIBRATION  = -1.2
+# Calibration offset — set via env; new retrain.py model should need less correction
+TOTAL_CALIBRATION  = float(os.getenv("TOTAL_CALIBRATION", "-1.2"))
 
-# Home bias correction — model picks home 75% of the time vs actual ~54%
-# Shift home win prob down 3% before making pick decisions
-HOME_BIAS_CORRECTION = 0.03
+# Home bias correction — set to 0: isotonic calibration in new model handles this
+HOME_BIAS_CORRECTION = float(os.getenv("HOME_BIAS_CORRECTION", "0.0"))
+
+# Elo constants (must match retrain.py)
+ELO_START    = 1500.0
+ELO_K        = 20.0
+ELO_HOME_ADV = 35.0
+
+# Ballpark run factors (must match retrain.py)
+PARK_FACTORS: Dict[str, float] = {
+    "COL": 1.18, "CIN": 1.10, "TEX": 1.07, "BOS": 1.06, "PHI": 1.05,
+    "MIL": 1.04, "CHC": 1.04, "HOU": 1.03, "ATL": 1.02, "NYY": 1.02,
+    "ARI": 1.01, "LAD": 1.00, "NYM": 1.00, "STL": 1.00, "DET": 0.99,
+    "BAL": 0.99, "CWS": 0.99, "TOR": 0.98, "MIA": 0.98, "MIN": 0.98,
+    "CLE": 0.97, "KC":  0.97, "TB":  0.97, "WSH": 0.97, "SF":  0.96,
+    "SEA": 0.96, "SD":  0.96, "PIT": 0.95, "LAA": 0.95, "ATH": 0.95,
+}
 
 # Batting order weights — leadoff matters most, drops toward bottom
 BATTING_ORDER_WEIGHTS = {1: 1.0, 2: 0.95, 3: 0.9, 4: 0.85, 5: 0.75,
@@ -490,6 +504,41 @@ def build_team_game_log(completed_games: pd.DataFrame) -> pd.DataFrame:
     return team_games.sort_values(["team","official_date"]).reset_index(drop=True)
 
 
+def compute_live_elo(completed_games: pd.DataFrame, target_date) -> Dict[str, float]:
+    """
+    Walk all completed games chronologically up to (not including) target_date
+    and return each team's current Elo rating.  No lookahead.
+    """
+    ratings: Dict[str, float] = {}
+    if completed_games.empty:
+        return ratings
+
+    hist = completed_games[completed_games["official_date"] < target_date].sort_values("official_date")
+    for _, row in hist.iterrows():
+        ht = row["home_team"]
+        at = row["away_team"]
+        h_elo = ratings.get(ht, ELO_START)
+        a_elo = ratings.get(at, ELO_START)
+        exp_h = 1.0 / (1.0 + 10 ** ((a_elo - h_elo - ELO_HOME_ADV) / 400.0))
+        actual_h = 1.0 if float(row["home_score"]) > float(row["away_score"]) else 0.0
+        delta = ELO_K * (actual_h - exp_h)
+        ratings[ht] = h_elo + delta
+        ratings[at] = a_elo - delta
+    return ratings
+
+
+def get_team_last5_run_diff(team_games: pd.DataFrame, team: str, target_date, current_season: int = 2026) -> float:
+    """Last-5 game average run differential (same season, before target_date)."""
+    tg = team_games[
+        (team_games["team"] == team) &
+        (team_games["season"] == current_season) &
+        (team_games["official_date"] < target_date)
+    ].sort_values("official_date").tail(5)
+    if tg.empty:
+        return 0.0
+    return float(tg["run_diff"].mean())
+
+
 def build_prior_baselines(team_games: pd.DataFrame) -> Dict[str, Dict[str, float]]:
     """Tapered weights: 2026=60%, 2025=30%, 2024=10%"""
     if team_games.empty:
@@ -730,6 +779,8 @@ def load_model_bundle() -> Dict[str, Any]:
         "total_models": obj["total_runs_models"],
         "feature_cols": obj.get("feature_cols"),
         "n_models":     obj.get("n_models"),
+        "calibrator":   obj.get("calibrator"),   # isotonic calibration (new model)
+        "park_factors": obj.get("park_factors", PARK_FACTORS),
     }
 
 
@@ -751,6 +802,13 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
     completed_games = load_completed_games()
     team_games      = build_team_game_log(completed_games)
     baselines       = build_prior_baselines(team_games)
+
+    # Pre-compute Elo ratings up to today (same target_date for all games in a day)
+    if not games_df.empty:
+        elo_target = games_df["official_date"].iloc[0]
+    else:
+        elo_target = date.today()
+    elo_ratings = compute_live_elo(completed_games, elo_target)
 
     probables_df            = load_probables()
     pitchers_df             = load_pitchers()
@@ -852,6 +910,20 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         home_lq = compute_lineup_quality(game_pk, "home", away_sp_id, lineups_df, bvp_df)
         away_lq = compute_lineup_quality(game_pk, "away", home_sp_id, lineups_df, bvp_df)
 
+        # --- New features for retrained model ---
+        home_elo = elo_ratings.get(home_team, ELO_START)
+        away_elo = elo_ratings.get(away_team, ELO_START)
+
+        home_park_factor = PARK_FACTORS.get(home_team, 1.0)
+
+        home_last5_rd = get_team_last5_run_diff(team_games, home_team, target_date, MLB_SEASON)
+        away_last5_rd = get_team_last5_run_diff(team_games, away_team, target_date, MLB_SEASON)
+        home_form_trend = home_last5_rd - home_rd
+        away_form_trend = away_last5_rd - away_rd
+
+        home_neutral_win_pct = home_win_pct * 0.5 + (1 - away_win_pct) * 0.5
+        away_neutral_win_pct = away_win_pct * 0.5 + (1 - home_win_pct) * 0.5
+
         rows.append({
             "game_pk":                  game_pk,
             "official_date":            target_date,
@@ -900,6 +972,22 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
             "lineup_ops_diff":          home_lq["ops_vs_sp"] - away_lq["ops_vs_sp"],
             "home_lineup_hard_hit":     home_lq["hard_hit_pct"],
             "away_lineup_hard_hit":     away_lq["hard_hit_pct"],
+            # New features (retrained model)
+            "elo_diff":                 home_elo - away_elo,
+            "home_elo_pre":             home_elo,
+            "away_elo_pre":             away_elo,
+            "home_park_factor":         home_park_factor,
+            "home_last5_run_diff":      home_last5_rd,
+            "away_last5_run_diff":      away_last5_rd,
+            "home_form_trend":          home_form_trend,
+            "away_form_trend":          away_form_trend,
+            "form_trend_diff":          home_form_trend - away_form_trend,
+            "home_neutral_win_pct":     home_neutral_win_pct,
+            "away_neutral_win_pct":     away_neutral_win_pct,
+            "neutral_win_pct_diff":     home_neutral_win_pct - away_neutral_win_pct,
+            "ou_over_rate_diff":        home_ou_rate - away_ou_rate,
+            "last_game_total_diff":     home_last_total - away_last_total,
+            "ats_cover_rate_diff":      home_ats_rate - away_ats_rate,
             "market_home_ml":           mkt_home_ml,
             "market_away_ml":           mkt_away_ml,
             "market_home_prob":         mkt_home_prob,
@@ -1169,6 +1257,14 @@ def main() -> None:
     home_prob,  home_lo,  home_hi,  home_std  = predict_ml_ensemble(bundle["win_models"], X)
     run_pred,   run_lo,   run_hi,   run_std   = predict_regression_ensemble(bundle["run_models"], X)
     total_pred, total_lo, total_hi, total_std = predict_regression_ensemble(bundle["total_models"], X)
+
+    # Apply isotonic calibration if available (new retrained model includes this)
+    calibrator = bundle.get("calibrator")
+    if calibrator is not None:
+        home_prob = calibrator.predict(home_prob)
+        home_lo   = calibrator.predict(home_lo)
+        home_hi   = calibrator.predict(home_hi)
+        log("  Isotonic calibration applied to win probabilities")
 
     out = features_df.copy()
     out["home_win_prob"]     = home_prob
