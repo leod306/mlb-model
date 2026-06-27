@@ -88,6 +88,13 @@ def stats_page(request: Request):
     return templates.TemplateResponse("stats.html", {"request": request})
 
 
+@router.get("/props", response_class=HTMLResponse)
+def props_page(request: Request, prop_date: Optional[str] = Query(default=None)):
+    if not prop_date:
+        prop_date = date.today().isoformat()
+    return templates.TemplateResponse("props.html", {"request": request, "prop_date": prop_date})
+
+
 # ---------------------------------------------------------------------------
 # API: stats dashboard
 # ---------------------------------------------------------------------------
@@ -487,3 +494,63 @@ def api_matchup_grid(game_pk: int):
         "away_vs_home_sp": merge_bvp(away_batters, away_bvp),
         "home_vs_away_sp": merge_bvp(home_batters, home_bvp),
     }
+
+
+# ---------------------------------------------------------------------------
+# API: player props
+# ---------------------------------------------------------------------------
+
+@router.get("/api/props")
+def api_props(prop_date: str = Query(..., description="YYYY-MM-DD")):
+    # Check if table exists
+    check_sql = text("""
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_name = 'player_props'
+        )
+    """)
+    with engine.begin() as conn:
+        exists = conn.execute(check_sql).scalar()
+
+    if not exists:
+        return {"ok": True, "date": prop_date, "count": 0, "props": [],
+                "message": "Player props not yet loaded. Run scripts/load_player_props.py first."}
+
+    sql = text("""
+        SELECT
+            id, prop_date::text AS prop_date, game_pk,
+            home_team, away_team, player_name, player_team,
+            prop_type, line, over_price, under_price,
+            avg_over_prob, projection, edge, pick, confidence,
+            bookmakers_used, updated_at::text AS updated_at
+        FROM player_props
+        WHERE prop_date = :d
+          AND pick IN ('OVER', 'UNDER')
+        ORDER BY ABS(edge) DESC, confidence DESC
+    """)
+
+    df = pd.read_sql(sql, engine, params={"d": prop_date})
+    rows: List[Dict[str, Any]] = []
+    for _, r in df.iterrows():
+        rows.append({
+            "id":             safe_int(r.get("id")),
+            "prop_date":      safe_str(r.get("prop_date")),
+            "game_pk":        safe_int(r.get("game_pk")),
+            "home_team":      safe_str(r.get("home_team")),
+            "away_team":      safe_str(r.get("away_team")),
+            "player_name":    safe_str(r.get("player_name")),
+            "player_team":    safe_str(r.get("player_team")),
+            "prop_type":      safe_str(r.get("prop_type")),
+            "line":           safe_float(r.get("line")),
+            "over_price":     safe_int(r.get("over_price")),
+            "under_price":    safe_int(r.get("under_price")),
+            "avg_over_prob":  safe_float(r.get("avg_over_prob")),
+            "projection":     safe_float(r.get("projection")),
+            "edge":           safe_float(r.get("edge")),
+            "pick":           safe_str(r.get("pick")),
+            "confidence":     safe_str(r.get("confidence")),
+            "bookmakers_used": safe_int(r.get("bookmakers_used")),
+            "updated_at":     safe_str(r.get("updated_at")),
+        })
+
+    return {"ok": True, "date": prop_date, "count": len(rows), "props": rows}

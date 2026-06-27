@@ -1,0 +1,380 @@
+{% extends "base.html" %}
+
+{% block title %}Player Props{% endblock %}
+
+{% block content %}
+<header>
+  <h1>Player Props</h1>
+  <p>Edge Detection • Hits • Total Bases • Home Runs • Strikeouts • Walks</p>
+</header>
+
+<div style="margin-bottom:16px; display:flex; gap:12px; flex-wrap:wrap; align-items:end;">
+  <div>
+    <label for="prop_date"><strong>Date</strong></label><br>
+    <input id="prop_date" type="date" value="{{ prop_date }}">
+  </div>
+
+  <div>
+    <label for="propType"><strong>Prop Type</strong></label><br>
+    <select id="propType" style="padding:6px 10px;">
+      <option value="">All Types</option>
+      <option value="batter_hits">Hits</option>
+      <option value="batter_total_bases">Total Bases</option>
+      <option value="batter_home_runs">Home Runs</option>
+      <option value="pitcher_strikeouts">Strikeouts</option>
+      <option value="batter_walks">Walks</option>
+    </select>
+  </div>
+
+  <div>
+    <label for="confFilter"><strong>Confidence</strong></label><br>
+    <select id="confFilter" style="padding:6px 10px;">
+      <option value="">All</option>
+      <option value="HIGH">High only</option>
+      <option value="MED">Med+</option>
+    </select>
+  </div>
+
+  <div>
+    <label for="playerSearch"><strong>Search Player</strong></label><br>
+    <input id="playerSearch" type="text" placeholder="Search player..." style="padding:6px 10px; min-width:180px;">
+  </div>
+
+  <div>
+    <button id="loadBtn" type="button">Load Props</button>
+  </div>
+</div>
+
+<div id="status" class="stats">Click "Load Props".</div>
+<div id="summary" style="margin-bottom:16px;"></div>
+<div id="propsTable"></div>
+
+<style>
+  .props-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .props-table th {
+    background: #0f172a;
+    color: #64748b;
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: .06em;
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 1px solid #1e293b;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+  .props-table th:hover { color: #94a3b8; }
+  .props-table th .sort-icon { margin-left: 4px; opacity: 0.4; }
+  .props-table th.sorted .sort-icon { opacity: 1; }
+  .props-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid #1e293b;
+    color: #e2e8f0;
+    vertical-align: middle;
+  }
+  .props-table tr:hover td { background: #0f172a; }
+
+  .pick-over  { color: #10b981; font-weight: 700; }
+  .pick-under { color: #ef4444; font-weight: 700; }
+
+  .conf-HIGH { background:#064e3b; color:#34d399; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:700; }
+  .conf-MED  { background:#1e3a5f; color:#60a5fa; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:700; }
+
+  .edge-pos { color: #34d399; font-weight:700; }
+  .edge-neg { color: #f87171; font-weight:700; }
+
+  .type-chip {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 11px;
+    background: #1e293b;
+    color: #94a3b8;
+    white-space: nowrap;
+  }
+  .type-chip.hits  { background:#1e3a5f; color:#93c5fd; }
+  .type-chip.tb    { background:#2d1b4e; color:#c4b5fd; }
+  .type-chip.hr    { background:#3b1515; color:#fca5a5; }
+  .type-chip.ks    { background:#1b2f1b; color:#86efac; }
+  .type-chip.bb    { background:#1c2d3e; color:#7dd3fc; }
+
+  .price-chip {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    background: #1e293b;
+    color: #94a3b8;
+  }
+  .price-chip.fav { color:#f59e0b; }
+  .price-chip.dog { color:#10b981; }
+
+  .summary-bar {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 12px 16px;
+    background: #0f172a;
+    border-radius: 8px;
+    border: 1px solid #1e293b;
+  }
+  .summary-stat { text-align: center; }
+  .summary-stat .val { font-size: 20px; font-weight: 700; color: #e2e8f0; }
+  .summary-stat .lbl { font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: .05em; margin-top: 2px; }
+
+  .no-props {
+    padding: 40px;
+    text-align: center;
+    color: #475569;
+    font-size: 14px;
+  }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const statusEl   = document.getElementById("status");
+const summaryEl  = document.getElementById("summary");
+const tableEl    = document.getElementById("propsTable");
+const dateEl     = document.getElementById("prop_date");
+const loadBtn    = document.getElementById("loadBtn");
+const typeFilter = document.getElementById("propType");
+const confFilter = document.getElementById("confFilter");
+const searchEl   = document.getElementById("playerSearch");
+
+let allProps  = [];
+let sortCol   = "edge_abs";
+let sortDir   = -1;  // -1 = desc
+
+const TYPE_LABELS = {
+  batter_hits:        "Hits",
+  batter_total_bases: "Total Bases",
+  batter_home_runs:   "Home Runs",
+  pitcher_strikeouts: "Strikeouts",
+  batter_walks:       "Walks",
+};
+
+const TYPE_CLASS = {
+  batter_hits:        "hits",
+  batter_total_bases: "tb",
+  batter_home_runs:   "hr",
+  pitcher_strikeouts: "ks",
+  batter_walks:       "bb",
+};
+
+function fmtPrice(p) {
+  if (p === null || p === undefined) return "—";
+  const n = Number(p);
+  const cls = n < 0 ? "fav" : "dog";
+  return `<span class="price-chip ${cls}">${n > 0 ? "+" : ""}${n}</span>`;
+}
+
+function fmtEdge(e) {
+  if (e === null || e === undefined) return "—";
+  const n = Number(e);
+  const pct = (n >= 0 ? "+" : "") + Math.round(n * 1000) / 10 + "%";
+  return `<span class="${n >= 0 ? "edge-pos" : "edge-neg"}">${pct}</span>`;
+}
+
+function fmtType(t) {
+  const cls = TYPE_CLASS[t] || "";
+  const lbl = TYPE_LABELS[t] || t;
+  return `<span class="type-chip ${cls}">${lbl}</span>`;
+}
+
+function fmtPick(pick) {
+  if (!pick) return "—";
+  const cls = pick === "OVER" ? "pick-over" : "pick-under";
+  return `<span class="${cls}">${pick}</span>`;
+}
+
+function fmtConf(c) {
+  if (!c) return "";
+  return `<span class="conf-${c}">${c}</span>`;
+}
+
+function fmtNum(x, d = 2) {
+  if (x === null || x === undefined || isNaN(Number(x))) return "—";
+  return Number(x).toFixed(d);
+}
+
+function filterProps() {
+  const type = typeFilter.value;
+  const conf = confFilter.value;
+  const q    = searchEl.value.trim().toLowerCase();
+
+  return allProps.filter(p => {
+    if (type && p.prop_type !== type) return false;
+    if (conf === "HIGH" && p.confidence !== "HIGH") return false;
+    if (conf === "MED"  && p.confidence === null)   return false;
+    if (q && !(p.player_name || "").toLowerCase().includes(q)) return false;
+    return true;
+  });
+}
+
+function sortProps(props) {
+  return [...props].sort((a, b) => {
+    let av, bv;
+    if (sortCol === "edge_abs") {
+      av = Math.abs(a.edge || 0);
+      bv = Math.abs(b.edge || 0);
+    } else if (sortCol === "edge") {
+      av = a.edge || 0;
+      bv = b.edge || 0;
+    } else if (sortCol === "line") {
+      av = a.line || 0;
+      bv = b.line || 0;
+    } else if (sortCol === "projection") {
+      av = a.projection || 0;
+      bv = b.projection || 0;
+    } else if (sortCol === "player_name") {
+      return sortDir * (a.player_name || "").localeCompare(b.player_name || "");
+    } else if (sortCol === "prop_type") {
+      return sortDir * (a.prop_type || "").localeCompare(b.prop_type || "");
+    } else {
+      av = a[sortCol] || 0;
+      bv = b[sortCol] || 0;
+    }
+    return sortDir * (bv - av);
+  });
+}
+
+function renderTable() {
+  const filtered = filterProps();
+  const sorted   = sortProps(filtered);
+
+  // Summary bar
+  const highs    = sorted.filter(p => p.confidence === "HIGH").length;
+  const meds     = sorted.filter(p => p.confidence === "MED").length;
+  const overs    = sorted.filter(p => p.pick === "OVER").length;
+  const unders   = sorted.filter(p => p.pick === "UNDER").length;
+
+  summaryEl.innerHTML = sorted.length === 0 ? "" : `
+    <div class="summary-bar">
+      <div class="summary-stat"><div class="val">${sorted.length}</div><div class="lbl">Total Edges</div></div>
+      <div class="summary-stat"><div class="val" style="color:#34d399">${highs}</div><div class="lbl">High Conf</div></div>
+      <div class="summary-stat"><div class="val" style="color:#60a5fa">${meds}</div><div class="lbl">Med Conf</div></div>
+      <div class="summary-stat"><div class="val" style="color:#10b981">${overs}</div><div class="lbl">Overs</div></div>
+      <div class="summary-stat"><div class="val" style="color:#ef4444">${unders}</div><div class="lbl">Unders</div></div>
+    </div>
+  `;
+
+  if (sorted.length === 0) {
+    tableEl.innerHTML = `<div class="no-props">No prop edges found for this date / filter.</div>`;
+    return;
+  }
+
+  function th(label, col) {
+    const active = sortCol === col ? "sorted" : "";
+    const icon   = sortCol === col ? (sortDir === -1 ? "▼" : "▲") : "⇅";
+    return `<th class="${active}" data-col="${col}">${label} <span class="sort-icon">${icon}</span></th>`;
+  }
+
+  const rows = sorted.map(p => {
+    const matchup = p.home_team && p.away_team ? `${p.away_team} @ ${p.home_team}` : (p.player_team || "—");
+    return `
+      <tr>
+        <td><strong>${p.player_name || "—"}</strong></td>
+        <td>${p.player_team || "—"}</td>
+        <td>${matchup}</td>
+        <td>${fmtType(p.prop_type)}</td>
+        <td style="text-align:center">${fmtNum(p.line, 1)}</td>
+        <td style="text-align:center">${fmtNum(p.projection, 2)}</td>
+        <td style="text-align:center">${fmtEdge(p.edge)}</td>
+        <td style="text-align:center">${fmtPick(p.pick)}</td>
+        <td style="text-align:center">${fmtConf(p.confidence)}</td>
+        <td style="text-align:center">${fmtPrice(p.pick === "OVER" ? p.over_price : p.under_price)}</td>
+        <td style="text-align:center; color:#475569">${p.bookmakers_used || "—"}</td>
+      </tr>
+    `;
+  }).join("");
+
+  tableEl.innerHTML = `
+    <table class="props-table">
+      <thead>
+        <tr>
+          ${th("Player", "player_name")}
+          ${th("Team", "player_team")}
+          <th>Matchup</th>
+          ${th("Prop", "prop_type")}
+          ${th("Line", "line")}
+          ${th("Projection", "projection")}
+          ${th("Edge", "edge_abs")}
+          <th>Pick</th>
+          <th>Conf</th>
+          <th>Price</th>
+          <th>Books</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+
+  // Attach sort listeners
+  document.querySelectorAll(".props-table th[data-col]").forEach(th => {
+    th.addEventListener("click", () => {
+      const col = th.dataset.col;
+      if (sortCol === col) {
+        sortDir = sortDir * -1;
+      } else {
+        sortCol = col;
+        sortDir = col === "player_name" || col === "player_team" || col === "prop_type" ? 1 : -1;
+      }
+      renderTable();
+    });
+  });
+}
+
+async function loadProps() {
+  try {
+    const d = dateEl.value;
+    statusEl.textContent = "Loading...";
+    summaryEl.innerHTML  = "";
+    tableEl.innerHTML    = "";
+    allProps = [];
+
+    const res = await fetch(`/api/props?prop_date=${encodeURIComponent(d)}`);
+    if (!res.ok) {
+      statusEl.textContent = `Request failed: ${res.status}`;
+      return;
+    }
+
+    const data = await res.json();
+    if (!data.ok) {
+      statusEl.textContent = "API returned an error.";
+      return;
+    }
+
+    if (data.message) {
+      statusEl.textContent = data.message;
+      return;
+    }
+
+    allProps = data.props || [];
+    if (allProps.length === 0) {
+      statusEl.textContent = `No prop edges found for ${d}. Run load_player_props.py to fetch today's props.`;
+      return;
+    }
+
+    statusEl.textContent = `${data.count} edge plays found for ${d}.`;
+    renderTable();
+
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = "JavaScript error loading props.";
+  }
+}
+
+loadBtn.addEventListener("click", loadProps);
+typeFilter.addEventListener("change", renderTable);
+confFilter.addEventListener("change", renderTable);
+searchEl.addEventListener("input", renderTable);
+document.addEventListener("DOMContentLoaded", loadProps);
+</script>
+{% endblock %}
