@@ -236,6 +236,7 @@ def fetch_props_for_event(event_id: str, home_team: str, away_team: str) -> List
 # =============================================================================
 
 def load_bvp() -> pd.DataFrame:
+    """Matchup-specific BvP (batter vs specific pitcher, PA >= 3)."""
     if not table_exists("batter_vs_pitcher"):
         return pd.DataFrame()
     try:
@@ -243,6 +244,37 @@ def load_bvp() -> pd.DataFrame:
             SELECT batter_id, pitcher_id, pa, ab, hits, home_runs,
                    strikeouts, walks, avg, obp, slg, hard_hit_pct, avg_exit_velo
             FROM batter_vs_pitcher WHERE pa >= 3
+        """), engine)
+    except Exception:
+        return pd.DataFrame()
+
+
+def load_bvp_career() -> pd.DataFrame:
+    """
+    Career aggregate per batter across ALL pitchers.
+    Used as fallback when matchup-specific BvP is unavailable.
+    """
+    if not table_exists("batter_vs_pitcher"):
+        return pd.DataFrame()
+    try:
+        return pd.read_sql(text("""
+            SELECT
+                batter_id,
+                SUM(pa)                                                  AS pa,
+                SUM(ab)                                                  AS ab,
+                SUM(hits)                                                AS hits,
+                SUM(home_runs)                                           AS home_runs,
+                SUM(walks)                                               AS walks,
+                CASE WHEN SUM(ab) > 0
+                     THEN SUM(hits)::float / SUM(ab) END                AS avg,
+                CASE WHEN SUM(pa) > 0
+                     THEN (SUM(hits) + SUM(walks))::float / SUM(pa) END AS obp,
+                CASE WHEN SUM(ab) > 0
+                     THEN (SUM(hits) + SUM(home_runs)*3)::float / SUM(ab) END AS slg
+            FROM batter_vs_pitcher
+            WHERE pa >= 1
+            GROUP BY batter_id
+            HAVING SUM(pa) >= 5
         """), engine)
     except Exception:
         return pd.DataFrame()
@@ -320,96 +352,113 @@ def load_games_for_date(target_date: date) -> pd.DataFrame:
 # PROJECTION ENGINE
 # =============================================================================
 
-def project_hits(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFrame) -> Optional[float]:
-    """
-    Project expected hits using BvP avg if available, else league average.
-    Hits per game ≈ avg × (plate appearances per game ~4.0)
-    """
-    if bvp_df.empty or lineups_df.empty:
-        return LEAGUE_AVG * 4.0
-
+def _get_player_id(player_name: str, lineups_df: pd.DataFrame) -> Optional[int]:
+    """Resolve player name → player_id from lineups."""
+    if lineups_df.empty:
+        return None
     name_key = player_name.strip().lower()
-    # Try to match player in lineups
     match = lineups_df[lineups_df["player_name"].str.lower().str.strip() == name_key]
-    if match.empty:
-        return LEAGUE_AVG * 4.0
+    return int(match.iloc[0]["player_id"]) if not match.empty else None
 
-    player_id = match.iloc[0]["player_id"]
-    bvp = bvp_df[bvp_df["batter_id"] == player_id]
-    if bvp.empty:
-        return LEAGUE_AVG * 4.0
 
-    avg = _safe_float(bvp.iloc[0].get("avg")) or LEAGUE_AVG
-    pa  = _safe_float(bvp.iloc[0].get("pa")) or 12
-    # Regress toward league avg based on sample size
-    weight = min(pa / 50.0, 1.0)
-    reg_avg = weight * avg + (1 - weight) * LEAGUE_AVG
+def _get_stat(player_id: Optional[int], bvp_df: pd.DataFrame,
+              career_df: pd.DataFrame, col: str, default: float) -> tuple[float, float]:
+    """
+    Return (stat_value, sample_pa) using matchup BvP first, then career aggregate.
+    """
+    if player_id is None:
+        return default, 0.0
+
+    # 1. Matchup-specific BvP
+    if not bvp_df.empty:
+        row = bvp_df[bvp_df["batter_id"] == player_id]
+        if not row.empty:
+            val = _safe_float(row.iloc[0].get(col))
+            pa  = _safe_float(row.iloc[0].get("pa")) or 0
+            if val is not None:
+                return val, pa
+
+    # 2. Career aggregate across all pitchers
+    if not career_df.empty:
+        row = career_df[career_df["batter_id"] == player_id]
+        if not row.empty:
+            val = _safe_float(row.iloc[0].get(col))
+            pa  = _safe_float(row.iloc[0].get("pa")) or 0
+            if val is not None:
+                return val, pa
+
+    return default, 0.0
+
+
+def project_hits(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFrame,
+                 career_df: pd.DataFrame = None) -> Optional[float]:
+    """Hits per game ≈ avg × 4.0 PA."""
+    if career_df is None:
+        career_df = pd.DataFrame()
+    player_id = _get_player_id(player_name, lineups_df)
+    avg, pa   = _get_stat(player_id, bvp_df, career_df, "avg", LEAGUE_AVG)
+    weight    = min(pa / 50.0, 1.0)
+    reg_avg   = weight * avg + (1 - weight) * LEAGUE_AVG
     return round(reg_avg * 4.0, 3)
 
 
-def project_total_bases(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFrame) -> Optional[float]:
-    if bvp_df.empty or lineups_df.empty:
-        return (LEAGUE_SLG * 4.0)
-
-    name_key = player_name.strip().lower()
-    match = lineups_df[lineups_df["player_name"].str.lower().str.strip() == name_key]
-    if match.empty:
-        return LEAGUE_SLG * 4.0
-
-    player_id = match.iloc[0]["player_id"]
-    bvp = bvp_df[bvp_df["batter_id"] == player_id]
-    if bvp.empty:
-        return LEAGUE_SLG * 4.0
-
-    slg = _safe_float(bvp.iloc[0].get("slg")) or LEAGUE_SLG
-    pa  = _safe_float(bvp.iloc[0].get("pa")) or 12
-    weight  = min(pa / 50.0, 1.0)
-    reg_slg = weight * slg + (1 - weight) * LEAGUE_SLG
+def project_total_bases(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFrame,
+                        career_df: pd.DataFrame = None) -> Optional[float]:
+    if career_df is None:
+        career_df = pd.DataFrame()
+    player_id = _get_player_id(player_name, lineups_df)
+    slg, pa   = _get_stat(player_id, bvp_df, career_df, "slg", LEAGUE_SLG)
+    weight    = min(pa / 50.0, 1.0)
+    reg_slg   = weight * slg + (1 - weight) * LEAGUE_SLG
     return round(reg_slg * 4.0, 3)
 
 
-def project_home_runs(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFrame) -> Optional[float]:
-    if bvp_df.empty or lineups_df.empty:
-        return 0.10  # ~1 HR per 10 games league avg
+def project_home_runs(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFrame,
+                      career_df: pd.DataFrame = None) -> Optional[float]:
+    if career_df is None:
+        career_df = pd.DataFrame()
+    player_id = _get_player_id(player_name, lineups_df)
+    # HR rate = home_runs / pa; compute manually from aggregated hits/hr counts
+    LEAGUE_HR_RATE = 0.10 / 4.0  # ~2.5% per PA
 
-    name_key = player_name.strip().lower()
-    match = lineups_df[lineups_df["player_name"].str.lower().str.strip() == name_key]
-    if match.empty:
-        return 0.10
+    if player_id is not None:
+        for df in [bvp_df, career_df]:
+            if df.empty:
+                continue
+            row = df[df["batter_id"] == player_id]
+            if not row.empty:
+                hr = _safe_float(row.iloc[0].get("home_runs")) or 0
+                pa = _safe_float(row.iloc[0].get("pa")) or 0
+                if pa >= 5:
+                    hr_rate = hr / pa
+                    weight  = min(pa / 80.0, 1.0)
+                    reg_hr  = weight * hr_rate + (1 - weight) * LEAGUE_HR_RATE
+                    return round(reg_hr * 4.0, 4)
 
-    player_id = match.iloc[0]["player_id"]
-    bvp = bvp_df[bvp_df["batter_id"] == player_id]
-    if bvp.empty:
-        return 0.10
-
-    hr = _safe_float(bvp.iloc[0].get("home_runs")) or 0
-    pa = _safe_float(bvp.iloc[0].get("pa"))        or 1
-    hr_rate = hr / pa
-    weight  = min(pa / 80.0, 1.0)
-    reg_hr  = weight * hr_rate + (1 - weight) * (0.10 / 4.0)
-    return round(reg_hr * 4.0, 4)
+    return round(LEAGUE_HR_RATE * 4.0, 4)
 
 
-def project_walks(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFrame) -> Optional[float]:
-    if bvp_df.empty or lineups_df.empty:
-        return (LEAGUE_OBP - LEAGUE_AVG) * 4.0  # walks ≈ OBP - AVG
+def project_walks(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFrame,
+                  career_df: pd.DataFrame = None) -> Optional[float]:
+    if career_df is None:
+        career_df = pd.DataFrame()
+    LEAGUE_BB_RATE = LEAGUE_OBP - LEAGUE_AVG  # ~0.065 per PA
 
-    name_key = player_name.strip().lower()
-    match = lineups_df[lineups_df["player_name"].str.lower().str.strip() == name_key]
-    if match.empty:
-        return (LEAGUE_OBP - LEAGUE_AVG) * 4.0
+    if player_id := _get_player_id(player_name, lineups_df):
+        for df in [bvp_df, career_df]:
+            if df.empty:
+                continue
+            row = df[df["batter_id"] == player_id]
+            if not row.empty:
+                walks = _safe_float(row.iloc[0].get("walks")) or 0
+                pa    = _safe_float(row.iloc[0].get("pa"))    or 0
+                if pa >= 5:
+                    bb_rate = walks / pa
+                    weight  = min(pa / 50.0, 1.0)
+                    reg_bb  = weight * bb_rate + (1 - weight) * LEAGUE_BB_RATE
+                    return round(reg_bb * 4.0, 4)
 
-    player_id = match.iloc[0]["player_id"]
-    bvp = bvp_df[bvp_df["batter_id"] == player_id]
-    if bvp.empty:
-        return (LEAGUE_OBP - LEAGUE_AVG) * 4.0
-
-    walks = _safe_float(bvp.iloc[0].get("walks")) or 0
-    pa    = _safe_float(bvp.iloc[0].get("pa"))    or 1
-    bb_rate = walks / pa
-    weight  = min(pa / 50.0, 1.0)
-    reg_bb  = weight * bb_rate + (1 - weight) * ((LEAGUE_OBP - LEAGUE_AVG))
-    return round(reg_bb * 4.0, 4)
+    return round(LEAGUE_BB_RATE * 4.0, 4)
 
 
 def project_strikeouts(pitcher_name: str, pgl_df: pd.DataFrame) -> Optional[float]:
@@ -440,7 +489,7 @@ def project_strikeouts(pitcher_name: str, pgl_df: pd.DataFrame) -> Optional[floa
 
 def score_prop(raw: Dict, lineups_df: pd.DataFrame, bvp_df: pd.DataFrame,
                pgl_df: pd.DataFrame, probables_df: pd.DataFrame,
-               game_pk: Optional[int]) -> Optional[Dict]:
+               game_pk: Optional[int], career_df: pd.DataFrame = None) -> Optional[Dict]:
     """
     Compare book line to projection. Return scored prop dict or None.
     """
@@ -472,16 +521,16 @@ def score_prop(raw: Dict, lineups_df: pd.DataFrame, bvp_df: pd.DataFrame,
         over_prob_nv = over_prob
 
     # Project
+    cd = career_df if career_df is not None else pd.DataFrame()
     if prop_type == "batter_hits":
-        proj = project_hits(player, bvp_df, lineups_df)
+        proj = project_hits(player, bvp_df, lineups_df, cd)
     elif prop_type == "batter_total_bases":
-        proj = project_total_bases(player, bvp_df, lineups_df)
+        proj = project_total_bases(player, bvp_df, lineups_df, cd)
     elif prop_type == "batter_home_runs":
-        proj = project_home_runs(player, bvp_df, lineups_df)
+        proj = project_home_runs(player, bvp_df, lineups_df, cd)
     elif prop_type == "batter_walks":
-        proj = project_walks(player, bvp_df, lineups_df)
+        proj = project_walks(player, bvp_df, lineups_df, cd)
     elif prop_type == "pitcher_strikeouts":
-        # Need pitcher name — match against probables
         proj = project_strikeouts(player, pgl_df)
     else:
         return None
@@ -594,13 +643,14 @@ def main() -> None:
     log(f"Target date: {target_date}")
 
     # Load supporting data
-    games_df    = load_games_for_date(target_date)
-    lineups_df  = load_lineups(games_df["game_pk"].tolist() if not games_df.empty else [])
-    bvp_df      = load_bvp()
-    pgl_df      = load_pitcher_game_log()
+    games_df     = load_games_for_date(target_date)
+    lineups_df   = load_lineups(games_df["game_pk"].tolist() if not games_df.empty else [])
+    bvp_df       = load_bvp()
+    career_df    = load_bvp_career()
+    pgl_df       = load_pitcher_game_log()
     probables_df = load_probables()
 
-    log(f"Games: {len(games_df)}  Lineups: {len(lineups_df)}  BvP rows: {len(bvp_df)}")
+    log(f"Games: {len(games_df)}  Lineups: {len(lineups_df)}  BvP rows: {len(bvp_df)}  Career rows: {len(career_df)}")
 
     # Normalize player names in lineups
     if not lineups_df.empty:
@@ -652,7 +702,7 @@ def main() -> None:
         total_raw += len(raw_props)
 
         for raw in raw_props:
-            scored = score_prop(raw, lineups_df, bvp_df, pgl_df, probables_df, game_pk)
+            scored = score_prop(raw, lineups_df, bvp_df, pgl_df, probables_df, game_pk, career_df)
             if scored and scored["pick"] != "PASS":
                 all_scored.append(scored)
 
