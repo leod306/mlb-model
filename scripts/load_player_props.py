@@ -249,13 +249,30 @@ def load_bvp() -> pd.DataFrame:
 
 
 def load_lineups(game_pks: List[int]) -> pd.DataFrame:
-    if not game_pks or not table_exists("lineups"):
+    """
+    Load lineups for today's game PKs first. If empty, fall back to the
+    full lineups table to build a name→player_id lookup (uses most recent
+    entry per player so RotoWire projected lineups are always usable).
+    """
+    if not table_exists("lineups"):
         return pd.DataFrame()
     try:
-        return pd.read_sql(
-            text("SELECT game_pk, player_id, player_name, side, batting_order FROM lineups WHERE game_pk = ANY(:pks)"),
-            engine, params={"pks": game_pks}
-        )
+        # Try today's games first
+        if game_pks:
+            df = pd.read_sql(
+                text("SELECT game_pk, player_id, player_name, side, batting_order FROM lineups WHERE game_pk = ANY(:pks)"),
+                engine, params={"pks": game_pks}
+            )
+            if not df.empty:
+                return df
+
+        # Fall back: latest entry per player across all games
+        df = pd.read_sql(text("""
+            SELECT DISTINCT ON (player_name) game_pk, player_id, player_name, side, batting_order
+            FROM lineups
+            ORDER BY player_name, game_pk DESC
+        """), engine)
+        return df
     except Exception:
         return pd.DataFrame()
 
