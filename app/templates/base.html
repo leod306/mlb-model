@@ -48,19 +48,78 @@
   <script>
     let chatOpen = false;
     let chatStreaming = false;
+    let _todayContext = null;
+
+    function todayStr() {
+      return new Date().toISOString().slice(0, 10);
+    }
+
+    async function loadTodayContext() {
+      if (_todayContext) return _todayContext;
+      try {
+        const d = todayStr();
+        const [propsRes, predsRes] = await Promise.all([
+          fetch(`/api/props?prop_date=${d}`),
+          fetch(`/api/predict/today?game_date=${d}`)
+        ]);
+        const propsData = await propsRes.json();
+        const predsData = await predsRes.json();
+
+        const topProps = (propsData.props || []).slice(0, 12).map(p => ({
+          player: p.player_name,
+          team: p.player_team,
+          matchup: `${p.away_team} @ ${p.home_team}`,
+          prop: p.prop_type,
+          line: p.line,
+          projection: p.projection,
+          edge: p.edge,
+          pick: p.pick,
+          confidence: p.confidence
+        }));
+
+        const topPreds = (predsData.predictions || [])
+          .filter(p => p.ok)
+          .slice(0, 8)
+          .map(p => ({
+            matchup: `${p.away_team} @ ${p.home_team}`,
+            away_sp: p.away_starting_pitcher || 'TBD',
+            home_sp: p.home_starting_pitcher || 'TBD',
+            ml_pick: p.ml_pick,
+            rl_pick: p.runline_pick,
+            ou_pick: p.ou_pick,
+            model_home_win_pct: p.home_win_prob ? Math.round(p.home_win_prob * 1000) / 10 + '%' : null,
+            market_home_win_pct: p.market_home_prob ? Math.round(p.market_home_prob * 1000) / 10 + '%' : null,
+            pred_total: p.pred_total_runs,
+            vegas_total: p.market_total_line,
+            model_edge: p.model_edge ? Math.round(p.model_edge * 1000) / 10 + '%' : null,
+            is_top_play: !!p.play_rank,
+            play_detail: p.play_detail
+          }));
+
+        _todayContext = { date: d, top_props: topProps, predictions: topPreds };
+      } catch (e) {
+        _todayContext = {};
+      }
+      return _todayContext;
+    }
 
     function toggleChat() {
       chatOpen = !chatOpen;
       document.getElementById('ai-chat-panel').classList.toggle('open', chatOpen);
-      if (chatOpen) setTimeout(() => document.getElementById('chat-input').focus(), 200);
+      if (chatOpen) {
+        setTimeout(() => document.getElementById('chat-input').focus(), 200);
+        loadTodayContext(); // pre-fetch in background
+      }
     }
 
     async function sendChat(prefillMsg, prefillCtx) {
       if (chatStreaming) return;
       const input = document.getElementById('chat-input');
       const msg   = prefillMsg || input.value.trim();
-      const ctx   = prefillCtx || {};
       if (!msg) return;
+
+      // Use prefill context if provided, otherwise inject today's model data
+      const ctx = prefillCtx || await loadTodayContext();
 
       if (!chatOpen) toggleChat();
 
