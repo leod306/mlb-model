@@ -576,16 +576,16 @@ Use a direct, confident tone. No filler phrases."""
 
 @router.post("/api/chat")
 async def api_chat(payload: ChatRequest):
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key:
         async def no_key():
-            yield f"data: {json.dumps({'text': 'ANTHROPIC_API_KEY not configured. Add it to Heroku config vars.'})}\n\n"
+            yield f"data: {json.dumps({'text': 'OPENAI_API_KEY not configured. Add it to Heroku config vars.'})}\n\n"
             yield "data: [DONE]\n\n"
         return StreamingResponse(no_key(), media_type="text/event-stream")
 
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
 
         ctx = payload.context
         context_str = ""
@@ -594,13 +594,18 @@ async def api_chat(payload: ChatRequest):
 
         async def stream_response():
             try:
-                with client.messages.stream(
-                    model="claude-haiku-4-5-20251001",
+                stream = client.chat.completions.create(
+                    model="gpt-4o-mini",
                     max_tokens=400,
-                    system=SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": payload.message + context_str}],
-                ) as stream:
-                    for text in stream.text_stream:
+                    stream=True,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": payload.message + context_str},
+                    ],
+                )
+                for chunk in stream:
+                    text = chunk.choices[0].delta.content or ""
+                    if text:
                         yield f"data: {json.dumps({'text': text})}\n\n"
             except Exception as e:
                 yield f"data: {json.dumps({'text': f'Error: {str(e)}'})}\n\n"
@@ -610,6 +615,6 @@ async def api_chat(payload: ChatRequest):
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     except ImportError:
         async def missing():
-            yield f"data: {json.dumps({'text': 'anthropic package not installed.'})}\n\n"
+            yield f"data: {json.dumps({'text': 'openai package not installed.'})}\n\n"
             yield "data: [DONE]\n\n"
         return StreamingResponse(missing(), media_type="text/event-stream")
