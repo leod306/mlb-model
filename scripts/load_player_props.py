@@ -60,6 +60,10 @@ BOOKMAKERS = "draftkings,fanduel,betmgm,betonlineag,betrivers"
 
 # Minimum edge to flag as a play — 8% keeps ~10-15% of props as edges
 MIN_EDGE = 0.08
+# Maximum plausible edge — anything above this is likely a data artifact
+MAX_EDGE = 0.20
+# Minimum books required on each side to trust the line
+MIN_BOOKS_EACH_SIDE = 2
 
 # League average fallbacks
 LEAGUE_AVG   = 0.255
@@ -667,9 +671,13 @@ def score_prop(raw: Dict, lineups_df: pd.DataFrame, bvp_df: pd.DataFrame,
     if not over_px:
         return None
 
+    # Require enough books on each side for a reliable consensus price
+    if len(over_px) < MIN_BOOKS_EACH_SIDE or len(under_px) < MIN_BOOKS_EACH_SIDE:
+        return None
+
     # Average prices across books
     avg_over  = sum(over_px)  / len(over_px)
-    avg_under = sum(under_px) / len(under_px) if under_px else None
+    avg_under = sum(under_px) / len(under_px)
 
     # Convert to no-vig probability
     over_prob  = american_to_prob(avg_over)
@@ -721,16 +729,16 @@ def score_prop(raw: Dict, lineups_df: pd.DataFrame, bvp_df: pd.DataFrame,
     proj_over_prob = min(max(proj_over_prob, 0.02), 0.98)
     edge = round(proj_over_prob - over_prob_nv, 4)
 
-    # Pick direction
-    if abs(edge) < MIN_EDGE:
+    # Pick direction — cap at MAX_EDGE to filter data artifacts
+    if abs(edge) < MIN_EDGE or abs(edge) > MAX_EDGE:
         pick = "PASS"
         confidence = "LOW"
     elif edge > 0:
         pick = "OVER"
-        confidence = "HIGH" if edge >= 0.10 else "MED"
+        confidence = "HIGH" if edge >= 0.13 else "MED"
     else:
         pick = "UNDER"
-        confidence = "HIGH" if edge <= -0.10 else "MED"
+        confidence = "HIGH" if edge <= -0.13 else "MED"
 
     # Determine player team
     player_team = None
