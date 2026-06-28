@@ -729,6 +729,10 @@ def score_prop(raw: Dict, lineups_df: pd.DataFrame, bvp_df: pd.DataFrame,
     proj_over_prob = min(max(proj_over_prob, 0.02), 0.98)
     edge = round(proj_over_prob - over_prob_nv, 4)
 
+    # Skip HR props with line >= 1.5 (need 2+ HRs — near impossible, always misflagged)
+    if prop_type == "batter_home_runs" and line >= 1.5:
+        return None
+
     # Pick direction — cap at MAX_EDGE to filter data artifacts
     if abs(edge) < MIN_EDGE or abs(edge) > MAX_EDGE:
         pick = "PASS"
