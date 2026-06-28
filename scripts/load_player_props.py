@@ -58,8 +58,8 @@ PROP_MARKETS = [
 # Bookmakers to average across
 BOOKMAKERS = "draftkings,fanduel,betmgm,betonlineag,betrivers"
 
-# Minimum edge to flag as a play (e.g. 0.05 = 5%)
-MIN_EDGE = 0.05
+# Minimum edge to flag as a play — 8% keeps ~10-15% of props as edges
+MIN_EDGE = 0.08
 
 # League average fallbacks
 LEAGUE_AVG   = 0.255
@@ -248,7 +248,8 @@ def load_season_batting_stats() -> pd.DataFrame:
         "group":    "hitting",
         "season":   MLB_SEASON,
         "gameType": "R",
-        "limit":    1000,
+        "sportId":  1,
+        "limit":    2000,
     }
     try:
         r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
@@ -292,7 +293,8 @@ def load_season_pitching_stats() -> pd.DataFrame:
         "group":    "pitching",
         "season":   MLB_SEASON,
         "gameType": "R",
-        "limit":    500,
+        "sportId":  1,
+        "limit":    1000,
     }
     try:
         r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
