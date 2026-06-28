@@ -1,7 +1,8 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}MLB Model{% endblock %}</title>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
@@ -20,6 +21,104 @@
   <div class="container">
     {% block content %}{% endblock %}
   </div>
+
+  <!-- Global AI Chat Widget -->
+  <button id="ai-chat-btn" title="Ask AI Analyst" onclick="toggleChat()">🤖</button>
+
+  <div id="ai-chat-panel">
+    <div class="chat-header">
+      <div class="chat-header-title">
+        <div class="chat-ai-dot"></div>
+        AI Analyst
+      </div>
+      <button class="chat-close" onclick="toggleChat()">✕</button>
+    </div>
+    <div class="chat-messages" id="chat-messages">
+      <div class="chat-msg ai">
+        Hey! Ask me about any pick — a player prop, game prediction, or just "what are your top plays today?"
+      </div>
+    </div>
+    <div class="chat-input-row">
+      <input id="chat-input" type="text" placeholder="Ask about any pick..."
+             onkeydown="if(event.key==='Enter') sendChat()">
+      <button id="chat-send" onclick="sendChat()">Send</button>
+    </div>
+  </div>
+
+  <script>
+    let chatOpen = false;
+    let chatStreaming = false;
+
+    function toggleChat() {
+      chatOpen = !chatOpen;
+      document.getElementById('ai-chat-panel').classList.toggle('open', chatOpen);
+      if (chatOpen) setTimeout(() => document.getElementById('chat-input').focus(), 200);
+    }
+
+    async function sendChat(prefillMsg, prefillCtx) {
+      if (chatStreaming) return;
+      const input = document.getElementById('chat-input');
+      const msg   = prefillMsg || input.value.trim();
+      const ctx   = prefillCtx || {};
+      if (!msg) return;
+
+      if (!chatOpen) toggleChat();
+
+      const msgsEl = document.getElementById('chat-messages');
+      const userDiv = document.createElement('div');
+      userDiv.className = 'chat-msg user';
+      userDiv.textContent = msg;
+      msgsEl.appendChild(userDiv);
+      if (!prefillMsg) input.value = '';
+
+      const aiMsg = document.createElement('div');
+      aiMsg.className = 'chat-msg ai streaming';
+      msgsEl.appendChild(aiMsg);
+      msgsEl.scrollTop = msgsEl.scrollHeight;
+
+      chatStreaming = true;
+      document.getElementById('chat-send').disabled = true;
+
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({message: msg, context: ctx})
+        });
+        const reader = res.body.getReader();
+        const dec    = new TextDecoder();
+        let buf      = '';
+
+        while (true) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, {stream: true});
+          const lines = buf.split('\n');
+          buf = lines.pop();
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const payload = line.slice(6).trim();
+            if (payload === '[DONE]') break;
+            try {
+              const obj = JSON.parse(payload);
+              if (obj.text) aiMsg.textContent += obj.text;
+            } catch {}
+          }
+          msgsEl.scrollTop = msgsEl.scrollHeight;
+        }
+      } catch (e) {
+        aiMsg.textContent = 'Connection error — try again.';
+      }
+
+      aiMsg.classList.remove('streaming');
+      chatStreaming = false;
+      document.getElementById('chat-send').disabled = false;
+      msgsEl.scrollTop = msgsEl.scrollHeight;
+    }
+
+    // Pages call this to pre-load pick context into chat
+    window.explainPick = function(msg, ctx) { sendChat(msg, ctx); };
+  </script>
 
   {% block scripts %}{% endblock %}
 </body>

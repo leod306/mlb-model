@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
 import math
+import os
 from datetime import date
 from typing import Optional, List, Dict, Any
 
 import pandas as pd
 from fastapi import APIRouter, Request, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.db import engine
@@ -554,3 +557,59 @@ def api_props(prop_date: str = Query(..., description="YYYY-MM-DD")):
         })
 
     return {"ok": True, "date": prop_date, "count": len(rows), "props": rows}
+
+
+# ---------------------------------------------------------------------------
+# API: AI chat (streaming via SSE)
+# ---------------------------------------------------------------------------
+
+class ChatRequest(BaseModel):
+    message: str
+    context: dict = {}
+
+SYSTEM_PROMPT = """You are a sharp MLB betting analyst embedded in an MLB model dashboard.
+You have access to the model's current predictions and player prop edges.
+Be concise (3-5 sentences max unless asked for more). Be specific — cite numbers, matchups, and reasons.
+When explaining a prop pick, mention: the line vs projection gap, what drives the edge (recent performance, pitcher matchup, season stats), and any relevant caution.
+When explaining a game pick, mention: win probability, model vs market gap, and key factors.
+Use a direct, confident tone. No filler phrases."""
+
+@router.post("/api/chat")
+async def api_chat(payload: ChatRequest):
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        async def no_key():
+            yield f"data: {json.dumps({'text': 'ANTHROPIC_API_KEY not configured. Add it to Heroku config vars.'})}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(no_key(), media_type="text/event-stream")
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+
+        ctx = payload.context
+        context_str = ""
+        if ctx:
+            context_str = f"\n\nContext data:\n{json.dumps(ctx, indent=2)}"
+
+        async def stream_response():
+            try:
+                with client.messages.stream(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=400,
+                    system=SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": payload.message + context_str}],
+                ) as stream:
+                    for text in stream.text_stream:
+                        yield f"data: {json.dumps({'text': text})}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'text': f'Error: {str(e)}'})}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(stream_response(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    except ImportError:
+        async def missing():
+            yield f"data: {json.dumps({'text': 'anthropic package not installed.'})}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(missing(), media_type="text/event-stream")

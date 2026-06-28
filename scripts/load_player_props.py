@@ -776,9 +776,14 @@ def score_prop(raw: Dict, lineups_df: pd.DataFrame, bvp_df: pd.DataFrame,
 # UPSERT
 # =============================================================================
 
-def upsert_props(rows: List[Dict]) -> int:
+def upsert_props(rows: List[Dict], target_date) -> int:
     if not rows:
         return 0
+
+    # Clear today's props first so stale data from previous runs doesn't linger
+    with engine.begin() as conn:
+        conn.execute(text(f"DELETE FROM {PROPS_TABLE} WHERE prop_date = :d"), {"d": target_date})
+    log(f"  Cleared existing props for {target_date}, saving {len(rows)} fresh rows")
 
     sql = f"""
     INSERT INTO {PROPS_TABLE} (
@@ -903,7 +908,7 @@ def main() -> None:
     log(f"Props with edge (non-PASS): {len(all_scored)}")
 
     # Save
-    n = upsert_props(all_scored)
+    n = upsert_props(all_scored, target_date)
     log(f"Saved {n} props to {PROPS_TABLE}")
 
     # Preview top edges

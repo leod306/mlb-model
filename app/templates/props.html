@@ -1,36 +1,24 @@
 {% extends "base.html" %}
-
 {% block title %}Player Props{% endblock %}
 
 {% block content %}
 <header>
   <h1>Player Props</h1>
-  <p>Edge Detection • Hits • Total Bases • Home Runs • Strikeouts • Walks</p>
+  <p>Edge Detection &bull; Hits &bull; Total Bases &bull; Home Runs &bull; Strikeouts &bull; Walks</p>
 </header>
 
-<div style="margin-bottom:16px; display:flex; gap:12px; flex-wrap:wrap; align-items:end;">
+<div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-bottom:18px;">
   <div>
-    <label for="prop_date"><strong>Date</strong></label><br>
+    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Date</label>
     <input id="prop_date" type="date" value="{{ prop_date }}">
   </div>
-
   <div>
-    <label for="gameFilter"><strong>Game</strong></label><br>
-    <select id="gameFilter" style="padding:6px 10px; min-width:160px;">
-      <option value="">All Games</option>
-    </select>
+    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Game</label>
+    <select id="gameFilter" style="min-width:150px;"><option value="">All Games</option></select>
   </div>
-
   <div>
-    <label for="teamFilter"><strong>Team</strong></label><br>
-    <select id="teamFilter" style="padding:6px 10px; min-width:100px;">
-      <option value="">All Teams</option>
-    </select>
-  </div>
-
-  <div>
-    <label for="propType"><strong>Prop Type</strong></label><br>
-    <select id="propType" style="padding:6px 10px;">
+    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Prop Type</label>
+    <select id="propType">
       <option value="">All Types</option>
       <option value="batter_hits">Hits</option>
       <option value="batter_total_bases">Total Bases</option>
@@ -39,396 +27,185 @@
       <option value="batter_walks">Walks</option>
     </select>
   </div>
-
   <div>
-    <label for="pickFilter"><strong>Side</strong></label><br>
-    <select id="pickFilter" style="padding:6px 10px;">
+    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Side</label>
+    <select id="pickFilter">
       <option value="">Both</option>
       <option value="OVER">Overs</option>
       <option value="UNDER">Unders</option>
     </select>
   </div>
-
   <div>
-    <label for="confFilter"><strong>Confidence</strong></label><br>
-    <select id="confFilter" style="padding:6px 10px;">
+    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Confidence</label>
+    <select id="confFilter">
       <option value="">All</option>
       <option value="HIGH">High only</option>
-      <option value="MED">Med+</option>
     </select>
   </div>
-
   <div>
-    <label for="playerSearch"><strong>Search Player</strong></label><br>
-    <input id="playerSearch" type="text" placeholder="Search player..." style="padding:6px 10px; min-width:160px;">
+    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Search</label>
+    <input id="playerSearch" type="text" placeholder="Player name..." style="min-width:140px;">
   </div>
-
-  <div style="align-self:flex-end; display:flex; gap:8px;">
-    <button id="resetBtn" type="button" style="background:#1e293b; color:#94a3b8;">Reset</button>
-    <button id="loadBtn" type="button">Load Props</button>
+  <div style="display:flex;gap:8px;">
+    <button onclick="resetFilters()" style="background:var(--bg3);color:var(--text2);border-color:var(--border);">Reset</button>
+    <button onclick="loadProps()" style="background:var(--blue);color:white;border:none;">Load Props</button>
   </div>
 </div>
 
-<div id="status" class="stats">Click "Load Props".</div>
-<div id="summary" style="margin-bottom:16px;"></div>
+<div id="status" style="color:var(--text2);font-size:14px;margin-bottom:12px;">Loading...</div>
+<div id="summary"></div>
 <div id="cards"></div>
 
 <style>
-  .prop-card {
-    background: #1e293b;
-    border: 1px solid #334155;
-    border-radius: 10px;
-    padding: 16px 18px;
-    margin-bottom: 12px;
-  }
-  .prop-card:hover {
-    border-color: #475569;
-  }
-  .prop-card.high-conf {
-    border-color: #065f46;
-  }
-
-  .prop-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-bottom: 12px;
-  }
-
-  .prop-player {
-    font-size: 16px;
-    font-weight: 700;
-    color: #e2e8f0;
-  }
-  .prop-matchup {
-    font-size: 12px;
-    color: #64748b;
-    margin-top: 2px;
-  }
-
-  .prop-badges {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    align-items: center;
-  }
-
-  .pick-badge {
-    padding: 4px 14px;
-    border-radius: 6px;
-    font-size: 13px;
-    font-weight: 700;
-  }
-  .pick-over  { background:#064e3b; color:#34d399; border:1px solid #065f46; }
-  .pick-under { background:#450a0a; color:#f87171; border:1px solid #7f1d1d; }
-
-  .conf-badge {
-    padding: 3px 10px;
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: 700;
-  }
-  .conf-HIGH { background:#064e3b; color:#34d399; }
-  .conf-MED  { background:#1e3a5f; color:#60a5fa; }
-
-  .type-chip {
-    padding: 3px 9px;
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: 600;
-  }
-  .type-hits { background:#1e3a5f; color:#93c5fd; }
-  .type-tb   { background:#2d1b4e; color:#c4b5fd; }
-  .type-hr   { background:#3b1515; color:#fca5a5; }
-  .type-ks   { background:#1b2f1b; color:#86efac; }
-  .type-bb   { background:#1c2d3e; color:#7dd3fc; }
-
-  .prop-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 8px;
-  }
-  @media (max-width: 640px) {
-    .prop-grid { grid-template-columns: repeat(2, 1fr); }
-  }
-
-  .prop-box {
-    background: #0f172a;
-    border-radius: 8px;
-    padding: 10px 14px;
-    border: 1px solid #1e293b;
-  }
-  .prop-box .lbl {
-    font-size: 10px;
-    color: #475569;
-    text-transform: uppercase;
-    letter-spacing: .05em;
-    margin-bottom: 4px;
-  }
-  .prop-box .val {
-    font-size: 15px;
-    font-weight: 700;
-    color: #e2e8f0;
-  }
-  .prop-box .sub {
-    font-size: 11px;
-    color: #64748b;
-    margin-top: 2px;
-  }
-
-  .edge-pos { color: #34d399; }
-  .edge-neg { color: #f87171; }
-  .edge-neu { color: #94a3b8; }
-
-  .price-pos { color: #10b981; }
-  .price-neg { color: #f59e0b; }
-
-  .summary-bar {
-    display: flex;
-    gap: 16px;
-    flex-wrap: wrap;
-    padding: 12px 16px;
-    background: #0f172a;
-    border-radius: 8px;
-    border: 1px solid #1e293b;
-    margin-bottom: 16px;
-  }
-  .summary-stat .val { font-size: 20px; font-weight: 700; color: #e2e8f0; }
-  .summary-stat .lbl { font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: .05em; margin-top: 2px; }
-
-  .no-props {
-    padding: 40px;
-    text-align: center;
-    color: #475569;
-    font-size: 14px;
-  }
-
-  .team-tag {
-    font-size: 11px;
-    color: #94a3b8;
-    background: #0f172a;
-    border: 1px solid #1e293b;
-    border-radius: 4px;
-    padding: 2px 7px;
-  }
+.prop-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  margin-bottom: 10px;
+  transition: border-color 0.15s;
+}
+.prop-card:hover { border-color: var(--border2); }
+.prop-card.high-conf { border-color: #065f46; }
+.prop-header { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:12px; }
+.prop-player { font-size:15px; font-weight:700; }
+.prop-matchup { font-size:12px; color:var(--text3); margin-top:3px; }
+.prop-badges { display:flex; gap:6px; flex-wrap:wrap; align-items:center; flex-shrink:0; }
+.prop-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+@media(max-width:600px){.prop-grid{grid-template-columns:repeat(2,1fr);}}
+.prop-box { background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:9px 12px; }
+.prop-box .lbl { font-size:9px; color:var(--text3); text-transform:uppercase; letter-spacing:.07em; margin-bottom:3px; }
+.prop-box .val { font-size:15px; font-weight:700; }
+.prop-box .sub { font-size:10px; color:var(--text3); margin-top:2px; }
+.explain-btn {
+  margin-top:10px; padding:6px 14px; font-size:12px; font-weight:600;
+  background:transparent; border:1px solid var(--border2); color:var(--text2);
+  border-radius:6px; cursor:pointer; display:inline-flex; align-items:center; gap:5px; transition:all .15s;
+}
+.explain-btn:hover { border-color:var(--blue); color:#93c5fd; background:var(--blue-dim); }
+.conf-bar { height:3px; background:var(--border); border-radius:99px; margin-top:11px; overflow:hidden; }
+.conf-fill { height:100%; border-radius:99px; background:linear-gradient(90deg,#3b82f6,#10b981); }
+.no-props { padding:48px; text-align:center; color:var(--text3); font-size:14px; }
 </style>
 {% endblock %}
 
 {% block scripts %}
 <script>
-const statusEl   = document.getElementById("status");
-const summaryEl  = document.getElementById("summary");
-const cardsEl    = document.getElementById("cards");
-const dateEl     = document.getElementById("prop_date");
-const loadBtn    = document.getElementById("loadBtn");
-const resetBtn   = document.getElementById("resetBtn");
-const gameFilter = document.getElementById("gameFilter");
-const teamFilter = document.getElementById("teamFilter");
-const typeFilter = document.getElementById("propType");
-const pickFilter = document.getElementById("pickFilter");
-const confFilter = document.getElementById("confFilter");
-const searchEl   = document.getElementById("playerSearch");
+const TYPE_LABEL={batter_hits:"Hits",batter_total_bases:"Total Bases",batter_home_runs:"Home Runs",pitcher_strikeouts:"Strikeouts",batter_walks:"Walks"};
+const TYPE_CLS={batter_hits:"badge-hits",batter_total_bases:"badge-tb",batter_home_runs:"badge-hr",pitcher_strikeouts:"badge-ks",batter_walks:"badge-bb"};
+let allProps=[];
 
-let allProps = [];
-let sortCol  = "edge_abs";
-let sortDir  = -1;
+function fmt(x,d=2){if(x==null||isNaN(+x))return"—";return(+x).toFixed(d);}
+function fmtPrice(p){if(p==null)return"—";const n=+p;const cls=n<0?"text-gold":"text-green";return`<span class="${cls}">${n>0?"+":""}${n}</span>`;}
+function fmtEdge(e){if(e==null)return"—";const n=+e;const pct=(n>=0?"+":"")+Math.round(n*1000)/10+"%";const cls=n>=0?"text-green":"text-red";return`<span class="${cls}" style="font-weight:700">${pct}</span>`;}
 
-const TYPE_LABELS = {
-  batter_hits:        "Hits",
-  batter_total_bases: "Total Bases",
-  batter_home_runs:   "Home Runs",
-  pitcher_strikeouts: "Strikeouts",
-  batter_walks:       "Walks",
-};
-const TYPE_CLASS = {
-  batter_hits:        "type-hits",
-  batter_total_bases: "type-tb",
-  batter_home_runs:   "type-hr",
-  pitcher_strikeouts: "type-ks",
-  batter_walks:       "type-bb",
-};
-
-function fmtNum(x, d=2) {
-  if (x == null || isNaN(Number(x))) return "—";
-  return Number(x).toFixed(d);
-}
-function fmtPrice(p) {
-  if (p == null) return "—";
-  const n = Number(p);
-  const cls = n < 0 ? "price-neg" : "price-pos";
-  return `<span class="${cls}">${n > 0 ? "+" : ""}${n}</span>`;
-}
-function fmtEdge(e) {
-  if (e == null) return "—";
-  const n = Number(e);
-  const pct = (n >= 0 ? "+" : "") + Math.round(n * 1000) / 10 + "%";
-  const cls = n >= 0.05 ? "edge-pos" : n <= -0.05 ? "edge-neg" : "edge-neu";
-  return `<span class="${cls}" style="font-size:15px;font-weight:700">${pct}</span>`;
+function cardHTML(p,i){
+  const mu=p.home_team&&p.away_team?`${p.away_team} @ ${p.home_team}`:"—";
+  const tl=TYPE_LABEL[p.prop_type]||p.prop_type;
+  const tc=TYPE_CLS[p.prop_type]||"";
+  const pc=p.pick==="OVER"?"badge-over":"badge-under";
+  const cc=p.confidence==="HIGH"?"badge-high":"badge-med";
+  const price=p.pick==="OVER"?p.over_price:p.under_price;
+  const isHigh=p.confidence==="HIGH";
+  const projPct=Math.round(Math.min(Math.abs(p.edge||0)/0.20*100,100));
+  return`<div class="prop-card ${isHigh?"high-conf":""}">
+    <div class="prop-header">
+      <div>
+        <div class="prop-player">${p.player_name||"—"}</div>
+        <div class="prop-matchup">${mu}${p.player_team?` &bull; <span style="color:var(--text2)">${p.player_team}</span>`:""}</div>
+      </div>
+      <div class="prop-badges">
+        <span class="badge ${tc}">${tl}</span>
+        <span class="badge ${pc}">${p.pick}</span>
+        <span class="badge ${cc}">${p.confidence}</span>
+      </div>
+    </div>
+    <div class="prop-grid">
+      <div class="prop-box"><div class="lbl">Line</div><div class="val">${fmt(p.line,1)}</div><div class="sub">${tl}</div></div>
+      <div class="prop-box"><div class="lbl">Projection</div><div class="val">${fmt(p.projection,2)}</div><div class="sub">Model estimate</div></div>
+      <div class="prop-box"><div class="lbl">Edge</div><div class="val">${fmtEdge(p.edge)}</div><div class="sub">vs no-vig line</div></div>
+      <div class="prop-box"><div class="lbl">Best Price</div><div class="val">${fmtPrice(price)}</div><div class="sub">${p.bookmakers_used||"—"} books</div></div>
+    </div>
+    <div class="conf-bar"><div class="conf-fill" style="width:${projPct}%"></div></div>
+    <button class="explain-btn" onclick="explainProp(${i})">🤖 Explain this pick</button>
+  </div>`;
 }
 
-function populateDropdowns() {
-  const games = [...new Set(allProps
-    .filter(p => p.home_team && p.away_team)
-    .map(p => `${p.away_team} @ ${p.home_team}`)
-  )].sort();
-  const teams = [...new Set(allProps
-    .flatMap(p => [p.home_team, p.away_team, p.player_team].filter(Boolean))
-  )].sort();
-
-  gameFilter.innerHTML = '<option value="">All Games</option>' +
-    games.map(g => `<option value="${g}">${g}</option>`).join("");
-  teamFilter.innerHTML = '<option value="">All Teams</option>' +
-    teams.map(t => `<option value="${t}">${t}</option>`).join("");
+function populateDropdowns(){
+  const games=[...new Set(allProps.filter(p=>p.home_team&&p.away_team).map(p=>`${p.away_team} @ ${p.home_team}`))].sort();
+  document.getElementById("gameFilter").innerHTML='<option value="">All Games</option>'+games.map(g=>`<option value="${g}">${g}</option>`).join("");
 }
 
-function filterProps() {
-  const game = gameFilter.value;
-  const team = teamFilter.value;
-  const type = typeFilter.value;
-  const pick = pickFilter.value;
-  const conf = confFilter.value;
-  const q    = searchEl.value.trim().toLowerCase();
-
-  return allProps.filter(p => {
-    const matchup = p.home_team && p.away_team ? `${p.away_team} @ ${p.home_team}` : "";
-    if (game && matchup !== game) return false;
-    if (team && p.home_team !== team && p.away_team !== team && p.player_team !== team) return false;
-    if (type && p.prop_type !== type) return false;
-    if (pick && p.pick !== pick) return false;
-    if (conf === "HIGH" && p.confidence !== "HIGH") return false;
-    if (conf === "MED"  && p.confidence === null)   return false;
-    if (q && !(p.player_name || "").toLowerCase().includes(q)) return false;
+function filterProps(){
+  const game=document.getElementById("gameFilter").value;
+  const type=document.getElementById("propType").value;
+  const pick=document.getElementById("pickFilter").value;
+  const conf=document.getElementById("confFilter").value;
+  const q=document.getElementById("playerSearch").value.trim().toLowerCase();
+  return allProps.filter(p=>{
+    const mu=p.home_team&&p.away_team?`${p.away_team} @ ${p.home_team}`:"";
+    if(game&&mu!==game)return false;
+    if(type&&p.prop_type!==type)return false;
+    if(pick&&p.pick!==pick)return false;
+    if(conf==="HIGH"&&p.confidence!=="HIGH")return false;
+    if(q&&!(p.player_name||"").toLowerCase().includes(q))return false;
     return true;
   });
 }
 
-function cardHTML(p) {
-  const matchup  = p.home_team && p.away_team ? `${p.away_team} @ ${p.home_team}` : "—";
-  const typeLabel = TYPE_LABELS[p.prop_type] || p.prop_type;
-  const typeCls   = TYPE_CLASS[p.prop_type]  || "";
-  const pickCls   = p.pick === "OVER" ? "pick-over" : "pick-under";
-  const confCls   = `conf-${p.confidence}`;
-  const price     = p.pick === "OVER" ? p.over_price : p.under_price;
-  const isHigh    = p.confidence === "HIGH";
-
-  return `
-    <div class="prop-card ${isHigh ? 'high-conf' : ''}">
-      <div class="prop-header">
-        <div>
-          <div class="prop-player">${p.player_name || "—"}</div>
-          <div class="prop-matchup">
-            ${p.player_team ? `<span class="team-tag">${p.player_team}</span> ` : ""}
-            ${matchup}
-          </div>
-        </div>
-        <div class="prop-badges">
-          <span class="type-chip ${typeCls}">${typeLabel}</span>
-          <span class="pick-badge ${pickCls}">${p.pick}</span>
-          <span class="conf-badge ${confCls}">${p.confidence}</span>
-        </div>
-      </div>
-
-      <div class="prop-grid">
-        <div class="prop-box">
-          <div class="lbl">Line</div>
-          <div class="val">${fmtNum(p.line, 1)}</div>
-          <div class="sub">${typeLabel}</div>
-        </div>
-        <div class="prop-box">
-          <div class="lbl">Projection</div>
-          <div class="val">${fmtNum(p.projection, 2)}</div>
-          <div class="sub">Model estimate</div>
-        </div>
-        <div class="prop-box">
-          <div class="lbl">Edge</div>
-          <div class="val">${fmtEdge(p.edge)}</div>
-          <div class="sub">vs no-vig line</div>
-        </div>
-        <div class="prop-box">
-          <div class="lbl">Best Price</div>
-          <div class="val">${fmtPrice(price)}</div>
-          <div class="sub">${p.bookmakers_used || "—"} books</div>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-function renderCards() {
-  const filtered = filterProps();
-  const sorted   = [...filtered].sort((a, b) =>
-    sortDir * (Math.abs(b.edge || 0) - Math.abs(a.edge || 0))
-  );
-
-  const highs  = sorted.filter(p => p.confidence === "HIGH").length;
-  const meds   = sorted.filter(p => p.confidence === "MED").length;
-  const overs  = sorted.filter(p => p.pick === "OVER").length;
-  const unders = sorted.filter(p => p.pick === "UNDER").length;
-
-  summaryEl.innerHTML = sorted.length === 0 ? "" : `
+function renderCards(){
+  const filtered=filterProps().sort((a,b)=>Math.abs(b.edge||0)-Math.abs(a.edge||0));
+  const highs=filtered.filter(p=>p.confidence==="HIGH").length;
+  const overs=filtered.filter(p=>p.pick==="OVER").length;
+  const unders=filtered.filter(p=>p.pick==="UNDER").length;
+  document.getElementById("summary").innerHTML=filtered.length===0?"": `
     <div class="summary-bar">
-      <div class="summary-stat"><div class="val">${sorted.length}</div><div class="lbl">Total Edges</div></div>
-      <div class="summary-stat"><div class="val" style="color:#34d399">${highs}</div><div class="lbl">High Conf</div></div>
-      <div class="summary-stat"><div class="val" style="color:#60a5fa">${meds}</div><div class="lbl">Med Conf</div></div>
+      <div class="summary-stat"><div class="val">${filtered.length}</div><div class="lbl">Total Edges</div></div>
+      <div class="summary-stat"><div class="val text-green">${highs}</div><div class="lbl">High Conf</div></div>
       <div class="summary-stat"><div class="val" style="color:#10b981">${overs}</div><div class="lbl">Overs</div></div>
-      <div class="summary-stat"><div class="val" style="color:#ef4444">${unders}</div><div class="lbl">Unders</div></div>
-    </div>
-  `;
-
-  if (sorted.length === 0) {
-    cardsEl.innerHTML = `<div class="no-props">No prop edges found for this filter.</div>`;
-    return;
-  }
-
-  cardsEl.innerHTML = sorted.map(cardHTML).join("");
+      <div class="summary-stat"><div class="val text-red">${unders}</div><div class="lbl">Unders</div></div>
+    </div>`;
+  window._filteredProps=filtered;
+  document.getElementById("cards").innerHTML=filtered.length===0
+    ?`<div class="no-props">No prop edges found for this filter.</div>`
+    :filtered.map((p,i)=>cardHTML(p,i)).join("");
 }
 
-async function loadProps() {
-  try {
-    const d = dateEl.value;
-    statusEl.textContent = "Loading...";
-    summaryEl.innerHTML  = "";
-    cardsEl.innerHTML    = "";
-    allProps = [];
-
-    const res = await fetch(`/api/props?prop_date=${encodeURIComponent(d)}`);
-    if (!res.ok) { statusEl.textContent = `Request failed: ${res.status}`; return; }
-
-    const data = await res.json();
-    if (!data.ok) { statusEl.textContent = "API error."; return; }
-    if (data.message) { statusEl.textContent = data.message; return; }
-
-    allProps = data.props || [];
-    if (allProps.length === 0) {
-      statusEl.textContent = `No edges for ${d}. Run load_player_props.py first.`;
-      return;
-    }
-
-    statusEl.textContent = `${data.count} edge plays for ${d}.`;
-    populateDropdowns();
-    renderCards();
-  } catch (err) {
-    console.error(err);
-    statusEl.textContent = "Error loading props.";
-  }
+function explainProp(i){
+  const p=window._filteredProps[i];if(!p)return;
+  const tl=TYPE_LABEL[p.prop_type]||p.prop_type;
+  const mu=p.home_team&&p.away_team?`${p.away_team} @ ${p.home_team}`:"unknown game";
+  const edgePct=Math.round((p.edge||0)*1000)/10;
+  window.explainPick(
+    `Explain why the model likes ${p.player_name} ${p.pick} ${p.line} ${tl} in ${mu}.`,
+    {player:p.player_name,prop:tl,line:p.line,pick:p.pick,projection:p.projection,
+     edge_pct:edgePct+"%",confidence:p.confidence,over_price:p.over_price,
+     under_price:p.under_price,bookmakers:p.bookmakers_used,matchup:mu,team:p.player_team}
+  );
 }
 
-loadBtn.addEventListener("click", loadProps);
-resetBtn.addEventListener("click", () => {
-  gameFilter.value = "";
-  teamFilter.value = "";
-  typeFilter.value = "";
-  pickFilter.value = "";
-  confFilter.value = "";
-  searchEl.value   = "";
-  renderCards();
-});
-[gameFilter, teamFilter, typeFilter, pickFilter, confFilter].forEach(el =>
-  el.addEventListener("change", renderCards)
-);
-searchEl.addEventListener("input", renderCards);
-document.addEventListener("DOMContentLoaded", loadProps);
+async function loadProps(){
+  const d=document.getElementById("prop_date").value;
+  document.getElementById("status").textContent="Loading...";
+  document.getElementById("summary").innerHTML="";
+  document.getElementById("cards").innerHTML="";
+  allProps=[];
+  try{
+    const data=await(await fetch(`/api/props?prop_date=${encodeURIComponent(d)}`)).json();
+    if(!data.ok||data.message){document.getElementById("status").textContent=data.message||"API error.";return;}
+    allProps=data.props||[];
+    if(!allProps.length){document.getElementById("status").textContent=`No edges for ${d}. Run load_player_props.py first.`;return;}
+    document.getElementById("status").textContent=`${data.count} edge plays for ${d}.`;
+    populateDropdowns();renderCards();
+  }catch(e){document.getElementById("status").textContent="Error loading props.";}
+}
+
+function resetFilters(){
+  ["gameFilter","propType","pickFilter","confFilter"].forEach(id=>document.getElementById(id).value="");
+  document.getElementById("playerSearch").value="";renderCards();
+}
+["gameFilter","propType","pickFilter","confFilter"].forEach(id=>document.getElementById(id).addEventListener("change",renderCards));
+document.getElementById("playerSearch").addEventListener("input",renderCards);
+document.addEventListener("DOMContentLoaded",loadProps);
 </script>
 {% endblock %}

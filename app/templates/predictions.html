@@ -171,7 +171,7 @@ function pickClass(pick) {
   return "";
 }
 
-function cardHTML(p) {
+function cardHTML(p, i) {
   const winPct = pct(p.home_win_prob);
   const awayWinPct = (winPct === "—") ? "—" : Math.round((100 - Number(winPct)) * 10) / 10;
   const barWidth = typeof winPct === "number" ? Math.max(0, Math.min(100, winPct)) : 0;
@@ -275,6 +275,12 @@ function cardHTML(p) {
           <div class="confidence-fill" style="width:${barWidth}%"></div>
         </div>
 
+        <button onclick="explainGame(${i})" style="margin-top:12px;padding:6px 14px;font-size:12px;font-weight:600;background:transparent;border:1px solid var(--border2);color:var(--text2);border-radius:6px;cursor:pointer;transition:all .15s;"
+          onmouseover="this.style.borderColor='var(--blue)';this.style.color='#93c5fd';this.style.background='var(--blue-dim)'"
+          onmouseout="this.style.borderColor='var(--border2)';this.style.color='var(--text2)';this.style.background='transparent'">
+          🤖 Explain this pick
+        </button>
+
       ` : `
         <div class="stats" style="margin-top:14px;">
           No prediction available${p.error ? `: ${p.error}` : "."}
@@ -324,12 +330,36 @@ async function loadPredictions() {
     });
 
     statusEl.textContent = `Loaded ${data.count} games for ${d}.`;
-    cardsEl.innerHTML = data.predictions.map(cardHTML).join("");
+    window._predictions = data.predictions;
+    cardsEl.innerHTML = data.predictions.map((p, i) => cardHTML(p, i)).join("");
     applySearchFilter();
   } catch (err) {
     console.error(err);
     statusEl.textContent = "JavaScript error loading predictions.";
   }
+}
+
+function explainGame(i) {
+  const p = (window._predictions || [])[i];
+  if (!p) return;
+  const matchup = `${p.away_team} @ ${p.home_team}`;
+  const winPct = p.home_win_prob ? Math.round(p.home_win_prob * 1000) / 10 : null;
+  const mktPct = p.market_home_prob ? Math.round(p.market_home_prob * 1000) / 10 : null;
+  window.explainPick(
+    `Explain the model's picks for ${matchup}: ML ${p.ml_pick}, RL ${p.runline_pick}, O/U ${p.ou_pick}.`,
+    {
+      matchup, away_team: p.away_team, home_team: p.home_team,
+      away_sp: p.away_starting_pitcher || "TBD",
+      home_sp: p.home_starting_pitcher || "TBD",
+      model_home_win_pct: winPct ? winPct + "%" : null,
+      market_home_win_pct: mktPct ? mktPct + "%" : null,
+      model_edge: p.model_edge ? Math.round(p.model_edge * 1000) / 10 + "%" : null,
+      ml_pick: p.ml_pick, rl_pick: p.runline_pick, ou_pick: p.ou_pick,
+      pred_total: p.pred_total_runs, vegas_total: p.market_total_line,
+      fair_home_ml: p.home_moneyline_fair, market_home_ml: p.market_home_ml,
+      is_top_play: !!p.play_rank, play_detail: p.play_detail
+    }
+  );
 }
 
 loadBtn.addEventListener("click", loadPredictions);
