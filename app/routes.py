@@ -443,12 +443,14 @@ def api_matchup_grid(game_pk: int):
     def get_bvp(batter_ids, pitcher_id):
         if not batter_ids or not pitcher_id:
             return {}
-        sql = text("""
+        # Use inline placeholders instead of ANY(:bids) to avoid PG array cast issues
+        placeholders = ",".join(str(int(b)) for b in batter_ids)
+        sql = text(f"""
             SELECT batter_id, pa, ab, hits, home_runs, strikeouts, walks,
                    avg, obp, slg, hard_hit_pct, avg_exit_velo, k_pct, bb_pct
-            FROM batter_vs_pitcher WHERE batter_id = ANY(:bids) AND pitcher_id = :pid
+            FROM batter_vs_pitcher WHERE batter_id IN ({placeholders}) AND pitcher_id = :pid
         """)
-        df = pd.read_sql(sql, engine, params={"bids": batter_ids, "pid": pitcher_id})
+        df = pd.read_sql(sql, engine, params={"pid": pitcher_id})
         if df.empty:
             return {}
         df = df.where(pd.notna(df), other=None)
