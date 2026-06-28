@@ -1261,10 +1261,9 @@ def main() -> None:
     # Apply isotonic calibration if available (new retrained model includes this)
     calibrator = bundle.get("calibrator")
     if calibrator is not None:
-        import numpy as np
-        home_prob = float(calibrator.predict(np.array([home_prob]))[0])
-        home_lo   = float(calibrator.predict(np.array([home_lo]))[0])
-        home_hi   = float(calibrator.predict(np.array([home_hi]))[0])
+        home_prob = calibrator.predict(home_prob)
+        home_lo   = calibrator.predict(home_lo)
+        home_hi   = calibrator.predict(home_hi)
         log("  Isotonic calibration applied to win probabilities")
 
     out = features_df.copy()
