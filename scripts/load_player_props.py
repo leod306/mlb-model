@@ -232,6 +232,93 @@ def fetch_props_for_event(event_id: str, home_team: str, away_team: str) -> List
 
 
 # =============================================================================
+# 2026 SEASON BATTING STATS — primary projection source
+# =============================================================================
+
+def load_season_batting_stats() -> pd.DataFrame:
+    """
+    Pull current season batting stats from MLB Stats API (free, no key).
+    Returns DataFrame with player_id, avg, slg, obp, ab, pa, hits, home_runs, walks.
+    This is the primary source — far more reliable than sparse BvP data.
+    """
+    url = "https://statsapi.mlb.com/api/v1/stats"
+    params = {
+        "stats":    "season",
+        "group":    "hitting",
+        "season":   MLB_SEASON,
+        "gameType": "R",
+        "limit":    1000,
+    }
+    try:
+        r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
+        r.raise_for_status()
+        splits = r.json().get("stats", [{}])[0].get("splits", [])
+        rows = []
+        for s in splits:
+            p = s.get("player", {})
+            st = s.get("stat", {})
+            ab = int(st.get("atBats", 0) or 0)
+            pa = int(st.get("plateAppearances", 0) or 0)
+            if pa < 10:
+                continue
+            rows.append({
+                "player_id":   p.get("id"),
+                "player_name": (p.get("fullName") or "").lower().strip(),
+                "avg":         float(st.get("avg", 0) or 0),
+                "slg":         float(st.get("slg", 0) or 0),
+                "obp":         float(st.get("obp", 0) or 0),
+                "ab":          ab,
+                "pa":          pa,
+                "hits":        int(st.get("hits", 0) or 0),
+                "home_runs":   int(st.get("homeRuns", 0) or 0),
+                "walks":       int(st.get("baseOnBalls", 0) or 0),
+            })
+        log(f"  Season stats loaded: {len(rows)} batters")
+        return pd.DataFrame(rows)
+    except Exception as e:
+        log(f"  Season stats fetch failed: {e}")
+        return pd.DataFrame()
+
+
+def load_season_pitching_stats() -> pd.DataFrame:
+    """
+    Pull current season pitching stats from MLB Stats API.
+    Used as fallback when pitcher_game_log has no recent starts.
+    """
+    url = "https://statsapi.mlb.com/api/v1/stats"
+    params = {
+        "stats":    "season",
+        "group":    "pitching",
+        "season":   MLB_SEASON,
+        "gameType": "R",
+        "limit":    500,
+    }
+    try:
+        r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
+        r.raise_for_status()
+        splits = r.json().get("stats", [{}])[0].get("splits", [])
+        rows = []
+        for s in splits:
+            p = s.get("player", {})
+            st = s.get("stat", {})
+            ip = float(st.get("inningsPitched", 0) or 0)
+            if ip < 5:
+                continue
+            rows.append({
+                "player_id":    p.get("id"),
+                "pitcher_name": (p.get("fullName") or "").lower().strip(),
+                "k_per_9":      float(st.get("strikeoutsPer9Inn", 0) or 0),
+                "innings_pitched": ip,
+                "avg_ip_per_start": ip / max(int(st.get("gamesStarted", 1) or 1), 1),
+            })
+        log(f"  Season pitching stats loaded: {len(rows)} pitchers")
+        return pd.DataFrame(rows)
+    except Exception as e:
+        log(f"  Season pitching stats fetch failed: {e}")
+        return pd.DataFrame()
+
+
+# =============================================================================
 # BvP + PITCHER DATA
 # =============================================================================
 
@@ -352,135 +439,207 @@ def load_games_for_date(target_date: date) -> pd.DataFrame:
 # PROJECTION ENGINE
 # =============================================================================
 
-def _get_player_id(player_name: str, lineups_df: pd.DataFrame) -> Optional[int]:
-    """Resolve player name → player_id from lineups."""
-    if lineups_df.empty:
+def _get_player_id(player_name: str, lineups_df: pd.DataFrame,
+                   season_df: pd.DataFrame = None) -> Optional[int]:
+    """
+    Resolve player name → player_id.
+    Tries lineups table first, then season stats by name.
+    """
+    name_key = player_name.strip().lower()
+
+    if not lineups_df.empty:
+        match = lineups_df[lineups_df["player_name"].str.lower().str.strip() == name_key]
+        if not match.empty and match.iloc[0]["player_id"]:
+            return int(match.iloc[0]["player_id"])
+
+    if season_df is not None and not season_df.empty:
+        match = season_df[season_df["player_name"] == name_key]
+        if not match.empty:
+            return int(match.iloc[0]["player_id"])
+
+    return None
+
+
+def _get_season_row(player_name: str, season_df: pd.DataFrame,
+                    lineups_df: pd.DataFrame) -> Optional[pd.Series]:
+    """Get season stats row by player name or player_id lookup."""
+    if season_df is None or season_df.empty:
         return None
     name_key = player_name.strip().lower()
-    match = lineups_df[lineups_df["player_name"].str.lower().str.strip() == name_key]
-    return int(match.iloc[0]["player_id"]) if not match.empty else None
 
+    # Direct name match
+    match = season_df[season_df["player_name"] == name_key]
+    if not match.empty:
+        return match.iloc[0]
 
-def _get_stat(player_id: Optional[int], bvp_df: pd.DataFrame,
-              career_df: pd.DataFrame, col: str, default: float) -> tuple[float, float]:
-    """
-    Return (stat_value, sample_pa) using matchup BvP first, then career aggregate.
-    """
-    if player_id is None:
-        return default, 0.0
+    # Try via player_id from lineups
+    pid = _get_player_id(player_name, lineups_df)
+    if pid is not None:
+        match = season_df[season_df["player_id"] == pid]
+        if not match.empty:
+            return match.iloc[0]
 
-    # 1. Matchup-specific BvP
-    if not bvp_df.empty:
-        row = bvp_df[bvp_df["batter_id"] == player_id]
-        if not row.empty:
-            val = _safe_float(row.iloc[0].get(col))
-            pa  = _safe_float(row.iloc[0].get("pa")) or 0
-            if val is not None:
-                return val, pa
-
-    # 2. Career aggregate across all pitchers
-    if not career_df.empty:
-        row = career_df[career_df["batter_id"] == player_id]
-        if not row.empty:
-            val = _safe_float(row.iloc[0].get(col))
-            pa  = _safe_float(row.iloc[0].get("pa")) or 0
-            if val is not None:
-                return val, pa
-
-    return default, 0.0
+    return None
 
 
 def project_hits(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFrame,
-                 career_df: pd.DataFrame = None) -> Optional[float]:
-    """Hits per game ≈ avg × 4.0 PA."""
+                 career_df: pd.DataFrame = None,
+                 season_df: pd.DataFrame = None) -> Optional[float]:
+    """
+    Hits per game ≈ avg × 4.0 PA.
+    Priority: season stats → career BvP → matchup BvP → None
+    """
+    # 1. Season stats (most reliable)
+    row = _get_season_row(player_name, season_df, lineups_df)
+    if row is not None:
+        avg = _safe_float(row.get("avg"))
+        pa  = _safe_float(row.get("pa")) or 0
+        if avg is not None and avg > 0:
+            weight  = min(pa / 200.0, 1.0)
+            reg_avg = weight * avg + (1 - weight) * LEAGUE_AVG
+            return round(reg_avg * 4.0, 3)
+
+    # 2. Career BvP fallback
     if career_df is None:
         career_df = pd.DataFrame()
     player_id = _get_player_id(player_name, lineups_df)
-    avg, pa   = _get_stat(player_id, bvp_df, career_df, "avg", LEAGUE_AVG)
-    weight    = min(pa / 50.0, 1.0)
-    reg_avg   = weight * avg + (1 - weight) * LEAGUE_AVG
-    return round(reg_avg * 4.0, 3)
+    if player_id and not career_df.empty:
+        r = career_df[career_df["batter_id"] == player_id]
+        if not r.empty:
+            avg = _safe_float(r.iloc[0].get("avg"))
+            pa  = _safe_float(r.iloc[0].get("pa")) or 0
+            if avg is not None and pa >= 10:
+                weight  = min(pa / 100.0, 1.0)
+                reg_avg = weight * avg + (1 - weight) * LEAGUE_AVG
+                return round(reg_avg * 4.0, 3)
+
+    return None
 
 
 def project_total_bases(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFrame,
-                        career_df: pd.DataFrame = None) -> Optional[float]:
+                        career_df: pd.DataFrame = None,
+                        season_df: pd.DataFrame = None) -> Optional[float]:
+    """Total bases per game ≈ slg × 4.0 PA."""
+    row = _get_season_row(player_name, season_df, lineups_df)
+    if row is not None:
+        slg = _safe_float(row.get("slg"))
+        pa  = _safe_float(row.get("pa")) or 0
+        if slg is not None and slg > 0:
+            weight  = min(pa / 200.0, 1.0)
+            reg_slg = weight * slg + (1 - weight) * LEAGUE_SLG
+            return round(reg_slg * 4.0, 3)
+
     if career_df is None:
         career_df = pd.DataFrame()
     player_id = _get_player_id(player_name, lineups_df)
-    slg, pa   = _get_stat(player_id, bvp_df, career_df, "slg", LEAGUE_SLG)
-    weight    = min(pa / 50.0, 1.0)
-    reg_slg   = weight * slg + (1 - weight) * LEAGUE_SLG
-    return round(reg_slg * 4.0, 3)
+    if player_id and not career_df.empty:
+        r = career_df[career_df["batter_id"] == player_id]
+        if not r.empty:
+            slg = _safe_float(r.iloc[0].get("slg"))
+            pa  = _safe_float(r.iloc[0].get("pa")) or 0
+            if slg is not None and pa >= 10:
+                weight  = min(pa / 100.0, 1.0)
+                reg_slg = weight * slg + (1 - weight) * LEAGUE_SLG
+                return round(reg_slg * 4.0, 3)
+
+    return None
 
 
 def project_home_runs(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFrame,
-                      career_df: pd.DataFrame = None) -> Optional[float]:
+                      career_df: pd.DataFrame = None,
+                      season_df: pd.DataFrame = None) -> Optional[float]:
+    """HR per game ≈ (HR / PA) × 4.0."""
+    LEAGUE_HR_RATE = 0.033 / 4.0  # ~3.3% of PA result in HR league-wide
+
+    row = _get_season_row(player_name, season_df, lineups_df)
+    if row is not None:
+        hr = _safe_float(row.get("home_runs")) or 0
+        pa = _safe_float(row.get("pa")) or 0
+        if pa >= 20:
+            hr_rate = hr / pa
+            weight  = min(pa / 300.0, 1.0)
+            reg_hr  = weight * hr_rate + (1 - weight) * LEAGUE_HR_RATE
+            return round(reg_hr * 4.0, 4)
+
     if career_df is None:
         career_df = pd.DataFrame()
     player_id = _get_player_id(player_name, lineups_df)
-    # HR rate = home_runs / pa; compute manually from aggregated hits/hr counts
-    LEAGUE_HR_RATE = 0.10 / 4.0  # ~2.5% per PA
+    if player_id and not career_df.empty:
+        r = career_df[career_df["batter_id"] == player_id]
+        if not r.empty:
+            hr = _safe_float(r.iloc[0].get("home_runs")) or 0
+            pa = _safe_float(r.iloc[0].get("pa")) or 0
+            if pa >= 10:
+                hr_rate = hr / pa
+                weight  = min(pa / 100.0, 1.0)
+                reg_hr  = weight * hr_rate + (1 - weight) * LEAGUE_HR_RATE
+                return round(reg_hr * 4.0, 4)
 
-    if player_id is not None:
-        for df in [bvp_df, career_df]:
-            if df.empty:
-                continue
-            row = df[df["batter_id"] == player_id]
-            if not row.empty:
-                hr = _safe_float(row.iloc[0].get("home_runs")) or 0
-                pa = _safe_float(row.iloc[0].get("pa")) or 0
-                if pa >= 5:
-                    hr_rate = hr / pa
-                    weight  = min(pa / 80.0, 1.0)
-                    reg_hr  = weight * hr_rate + (1 - weight) * LEAGUE_HR_RATE
-                    return round(reg_hr * 4.0, 4)
-
-    return round(LEAGUE_HR_RATE * 4.0, 4)
+    return None
 
 
 def project_walks(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFrame,
-                  career_df: pd.DataFrame = None) -> Optional[float]:
+                  career_df: pd.DataFrame = None,
+                  season_df: pd.DataFrame = None) -> Optional[float]:
+    """Walks per game ≈ (BB / PA) × 4.0."""
+    LEAGUE_BB_RATE = LEAGUE_OBP - LEAGUE_AVG  # ~0.065
+
+    row = _get_season_row(player_name, season_df, lineups_df)
+    if row is not None:
+        walks = _safe_float(row.get("walks")) or 0
+        pa    = _safe_float(row.get("pa")) or 0
+        if pa >= 20:
+            bb_rate = walks / pa
+            weight  = min(pa / 200.0, 1.0)
+            reg_bb  = weight * bb_rate + (1 - weight) * LEAGUE_BB_RATE
+            return round(reg_bb * 4.0, 4)
+
     if career_df is None:
         career_df = pd.DataFrame()
-    LEAGUE_BB_RATE = LEAGUE_OBP - LEAGUE_AVG  # ~0.065 per PA
+    player_id = _get_player_id(player_name, lineups_df)
+    if player_id and not career_df.empty:
+        r = career_df[career_df["batter_id"] == player_id]
+        if not r.empty:
+            walks = _safe_float(r.iloc[0].get("walks")) or 0
+            pa    = _safe_float(r.iloc[0].get("pa")) or 0
+            if pa >= 10:
+                bb_rate = walks / pa
+                weight  = min(pa / 100.0, 1.0)
+                reg_bb  = weight * bb_rate + (1 - weight) * LEAGUE_BB_RATE
+                return round(reg_bb * 4.0, 4)
 
-    if player_id := _get_player_id(player_name, lineups_df):
-        for df in [bvp_df, career_df]:
-            if df.empty:
-                continue
-            row = df[df["batter_id"] == player_id]
-            if not row.empty:
-                walks = _safe_float(row.iloc[0].get("walks")) or 0
-                pa    = _safe_float(row.iloc[0].get("pa"))    or 0
-                if pa >= 5:
-                    bb_rate = walks / pa
-                    weight  = min(pa / 50.0, 1.0)
-                    reg_bb  = weight * bb_rate + (1 - weight) * LEAGUE_BB_RATE
-                    return round(reg_bb * 4.0, 4)
-
-    return round(LEAGUE_BB_RATE * 4.0, 4)
+    return None
 
 
-def project_strikeouts(pitcher_name: str, pgl_df: pd.DataFrame) -> Optional[float]:
-    """Project pitcher Ks using last 5 starts."""
-    if pgl_df.empty:
-        return LEAGUE_K_PER_9 / 9.0 * 6.0  # ~6 IP per start
-
+def project_strikeouts(pitcher_name: str, pgl_df: pd.DataFrame,
+                       season_pitch_df: pd.DataFrame = None) -> Optional[float]:
+    """
+    Project pitcher Ks using last 5 starts (primary) or season K/9 (fallback).
+    """
     key = pitcher_name.strip().lower()
-    recent = pgl_df[pgl_df["pitcher_name_key"] == key].head(5)
-    if recent.empty:
-        return LEAGUE_K_PER_9 / 9.0 * 6.0
 
-    total_ip = _safe_float(recent["innings_pitched"].sum()) or 0
-    total_k  = _safe_float(recent["strikeouts"].sum())      or 0
-    if total_ip < 1:
-        return LEAGUE_K_PER_9 / 9.0 * 6.0
+    # 1. Recent game log (best — actual recent starts)
+    if not pgl_df.empty:
+        recent = pgl_df[pgl_df["pitcher_name_key"] == key].head(5)
+        if not recent.empty:
+            total_ip = _safe_float(recent["innings_pitched"].sum()) or 0
+            total_k  = _safe_float(recent["strikeouts"].sum())      or 0
+            if total_ip >= 1:
+                k_per_9 = (total_k / total_ip) * 9.0
+                weight  = min(len(recent) / 5.0, 1.0)
+                reg_k9  = weight * k_per_9 + (1 - weight) * LEAGUE_K_PER_9
+                avg_ip  = total_ip / len(recent)
+                return round(reg_k9 / 9.0 * avg_ip, 2)
 
-    k_per_9 = (total_k / total_ip) * 9.0
-    weight  = min(len(recent) / 5.0, 1.0)
-    reg_k9  = weight * k_per_9 + (1 - weight) * LEAGUE_K_PER_9
-    avg_ip  = total_ip / len(recent)
-    return round(reg_k9 / 9.0 * avg_ip, 2)
+    # 2. Season stats fallback
+    if season_pitch_df is not None and not season_pitch_df.empty:
+        match = season_pitch_df[season_pitch_df["pitcher_name"] == key]
+        if not match.empty:
+            k9  = _safe_float(match.iloc[0].get("k_per_9")) or LEAGUE_K_PER_9
+            avg_ip = _safe_float(match.iloc[0].get("avg_ip_per_start")) or 5.5
+            return round(k9 / 9.0 * avg_ip, 2)
+
+    return None
 
 
 # =============================================================================
@@ -489,7 +648,9 @@ def project_strikeouts(pitcher_name: str, pgl_df: pd.DataFrame) -> Optional[floa
 
 def score_prop(raw: Dict, lineups_df: pd.DataFrame, bvp_df: pd.DataFrame,
                pgl_df: pd.DataFrame, probables_df: pd.DataFrame,
-               game_pk: Optional[int], career_df: pd.DataFrame = None) -> Optional[Dict]:
+               game_pk: Optional[int], career_df: pd.DataFrame = None,
+               season_df: pd.DataFrame = None,
+               season_pitch_df: pd.DataFrame = None) -> Optional[Dict]:
     """
     Compare book line to projection. Return scored prop dict or None.
     """
@@ -520,18 +681,21 @@ def score_prop(raw: Dict, lineups_df: pd.DataFrame, bvp_df: pd.DataFrame,
     else:
         over_prob_nv = over_prob
 
-    # Project
+    # Project — season stats are primary source; BvP/career are fallbacks
     cd = career_df if career_df is not None else pd.DataFrame()
+    sd = season_df if season_df is not None else pd.DataFrame()
+    spd = season_pitch_df if season_pitch_df is not None else pd.DataFrame()
+
     if prop_type == "batter_hits":
-        proj = project_hits(player, bvp_df, lineups_df, cd)
+        proj = project_hits(player, bvp_df, lineups_df, cd, sd)
     elif prop_type == "batter_total_bases":
-        proj = project_total_bases(player, bvp_df, lineups_df, cd)
+        proj = project_total_bases(player, bvp_df, lineups_df, cd, sd)
     elif prop_type == "batter_home_runs":
-        proj = project_home_runs(player, bvp_df, lineups_df, cd)
+        proj = project_home_runs(player, bvp_df, lineups_df, cd, sd)
     elif prop_type == "batter_walks":
-        proj = project_walks(player, bvp_df, lineups_df, cd)
+        proj = project_walks(player, bvp_df, lineups_df, cd, sd)
     elif prop_type == "pitcher_strikeouts":
-        proj = project_strikeouts(player, pgl_df)
+        proj = project_strikeouts(player, pgl_df, spd)
     else:
         return None
 
@@ -643,14 +807,18 @@ def main() -> None:
     log(f"Target date: {target_date}")
 
     # Load supporting data
-    games_df     = load_games_for_date(target_date)
-    lineups_df   = load_lineups(games_df["game_pk"].tolist() if not games_df.empty else [])
-    bvp_df       = load_bvp()
-    career_df    = load_bvp_career()
-    pgl_df       = load_pitcher_game_log()
-    probables_df = load_probables()
+    games_df      = load_games_for_date(target_date)
+    lineups_df    = load_lineups(games_df["game_pk"].tolist() if not games_df.empty else [])
+    bvp_df        = load_bvp()
+    career_df     = load_bvp_career()
+    pgl_df        = load_pitcher_game_log()
+    probables_df  = load_probables()
+    season_df     = load_season_batting_stats()
+    season_pitch_df = load_season_pitching_stats()
 
-    log(f"Games: {len(games_df)}  Lineups: {len(lineups_df)}  BvP rows: {len(bvp_df)}  Career rows: {len(career_df)}")
+    log(f"Games: {len(games_df)}  Lineups: {len(lineups_df)}  "
+        f"BvP rows: {len(bvp_df)}  Career rows: {len(career_df)}  "
+        f"Season batters: {len(season_df)}  Season pitchers: {len(season_pitch_df)}")
 
     # Normalize player names in lineups
     if not lineups_df.empty:
@@ -702,7 +870,10 @@ def main() -> None:
         total_raw += len(raw_props)
 
         for raw in raw_props:
-            scored = score_prop(raw, lineups_df, bvp_df, pgl_df, probables_df, game_pk, career_df)
+            scored = score_prop(
+                raw, lineups_df, bvp_df, pgl_df, probables_df, game_pk,
+                career_df, season_df, season_pitch_df
+            )
             if scored and scored["pick"] != "PASS":
                 all_scored.append(scored)
 
