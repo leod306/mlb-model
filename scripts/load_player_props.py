@@ -244,12 +244,13 @@ def load_season_batting_stats() -> pd.DataFrame:
     """
     url = "https://statsapi.mlb.com/api/v1/stats"
     params = {
-        "stats":    "season",
-        "group":    "hitting",
-        "season":   MLB_SEASON,
-        "gameType": "R",
-        "sportId":  1,
-        "limit":    2000,
+        "stats":      "season",
+        "group":      "hitting",
+        "season":     MLB_SEASON,
+        "gameType":   "R",
+        "sportId":    1,
+        "playerPool": "All",
+        "limit":      2000,
     }
     try:
         r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
@@ -677,12 +678,16 @@ def score_prop(raw: Dict, lineups_df: pd.DataFrame, bvp_df: pd.DataFrame,
     if over_prob is None:
         return None
 
-    # Remove vig
+    # Remove vig — need both sides to de-vig properly
+    # If only one side available, use raw prob but require larger edge buffer
     if under_prob is not None:
         total = over_prob + under_prob
-        over_prob_nv  = over_prob  / total
+        if total < 0.5 or total > 2.0:  # sanity check
+            return None
+        over_prob_nv = over_prob / total
     else:
-        over_prob_nv = over_prob
+        # One-sided market — can't de-vig, skip to avoid false edges
+        return None
 
     # Project — season stats are primary source; BvP/career are fallbacks
     cd = career_df if career_df is not None else pd.DataFrame()
