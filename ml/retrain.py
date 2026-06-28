@@ -23,8 +23,7 @@ warnings.filterwarnings("ignore")
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import log_loss, brier_score_loss, mean_absolute_error
 from xgboost import XGBClassifier, XGBRegressor
@@ -339,18 +338,33 @@ def run_cv(X: pd.DataFrame, y_win: pd.Series, y_rd: pd.Series, y_tot: pd.Series)
 
 
 # ---------------------------------------------------------------------------
-# 7. Isotonic calibration on a held-out slice
+# 7. Platt scaling calibration on a held-out slice
 # ---------------------------------------------------------------------------
+class PlattCalibrator:
+    """
+    Sigmoid (Platt scaling) calibrator. Wraps a LogisticRegression so it
+    exposes a .predict(proba_array) → calibrated_proba_array interface
+    compatible with the engine. Unlike isotonic regression, sigmoid calibration
+    produces a smooth monotonic curve — every game gets a distinct win probability.
+    """
+    def __init__(self, lr: LogisticRegression):
+        self.lr = lr
+
+    def predict(self, raw_proba):
+        arr = np.asarray(raw_proba).reshape(-1, 1)
+        return self.lr.predict_proba(arr)[:, 1]
+
+
 def calibrate_win_models(win_models: list, X_cal: pd.DataFrame, y_cal: pd.Series):
     """
-    Fit an isotonic regression calibrator on ensemble win probabilities
+    Fit a Platt (sigmoid) calibrator on ensemble win probabilities
     from a held-out calibration set (last 20% of data by time).
-    Returns an IsotonicRegression that maps raw proba → calibrated proba.
+    Returns a PlattCalibrator that maps raw proba → calibrated proba.
     """
     raw_probas = np.mean([m.predict_proba(X_cal)[:, 1] for m in win_models], axis=0)
-    cal = IsotonicRegression(out_of_bounds="clip")
-    cal.fit(raw_probas, y_cal)
-    return cal
+    lr = LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000)
+    lr.fit(raw_probas.reshape(-1, 1), y_cal)
+    return PlattCalibrator(lr)
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +434,7 @@ def main():
             print(f"  Trained {i+1}/{N_MODELS}")
 
     # --- Calibrate win proba
-    print("\nFitting isotonic calibration on held-out set ...")
+    print("\nFitting Platt (sigmoid) calibration on held-out set ...")
     calibrator = calibrate_win_models(win_models, X_cal, y_cal)
 
     # Check calibration improvement
