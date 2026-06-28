@@ -1276,13 +1276,9 @@ def main() -> None:
     run_pred,   run_lo,   run_hi,   run_std   = predict_regression_ensemble(bundle["run_models"], X)
     total_pred, total_lo, total_hi, total_std = predict_regression_ensemble(bundle["total_models"], X)
 
-    # Apply Platt (sigmoid) calibration — smooth curve, distinct output per game
-    calibrator = bundle.get("calibrator")
-    if calibrator is not None:
-        home_prob = calibrator.predict(home_prob)
-        home_lo   = calibrator.predict(home_lo)
-        home_hi   = calibrator.predict(home_hi)
-        log("  Platt calibration applied to win probabilities")
+    # No post-hoc calibration — raw XGBoost ensemble probabilities used directly.
+    # The binary:logistic objective already produces well-spread, meaningful probs
+    # (e.g. 26%-74%) and any sigmoid/isotonic layer compresses them to ~53-55%.
 
     out = features_df.copy()
     out["home_win_prob"]     = home_prob
