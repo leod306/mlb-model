@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import os
+from scipy.stats import poisson as _poisson
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -702,9 +703,15 @@ def score_prop(raw: Dict, lineups_df: pd.DataFrame, bvp_df: pd.DataFrame,
     if proj is None:
         return None
 
-    # Edge: difference between our projection implied prob and book's no-vig prob
-    # Simple edge: (proj - line) normalized
-    proj_over_prob = min(max(0.5 + (proj - line) * 0.25, 0.05), 0.95)
+    # Convert projection (Poisson mean) → P(stat > line)
+    # For half-integer lines (0.5, 1.5, 2.5), P(X > line) = P(X >= floor(line)+1)
+    # = 1 - CDF(floor(line), lambda=proj)
+    k = int(math.floor(line))
+    try:
+        proj_over_prob = float(1.0 - _poisson.cdf(k, max(proj, 0.01)))
+    except Exception:
+        proj_over_prob = 0.5
+    proj_over_prob = min(max(proj_over_prob, 0.02), 0.98)
     edge = round(proj_over_prob - over_prob_nv, 4)
 
     # Pick direction
