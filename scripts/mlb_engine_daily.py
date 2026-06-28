@@ -764,6 +764,24 @@ def get_ats_cover_rate(team_games: pd.DataFrame, team: str, target_date, window:
 
 
 # =============================================================================
+# CALIBRATOR
+# Must be defined here (not just in retrain.py) so joblib can unpickle it.
+# =============================================================================
+class PlattCalibrator:
+    """
+    Sigmoid (Platt scaling) calibrator. Wraps LogisticRegression to expose
+    a .predict(proba_array) -> calibrated_proba_array interface.
+    """
+    def __init__(self, lr):
+        self.lr = lr
+
+    def predict(self, raw_proba):
+        import numpy as np
+        arr = np.asarray(raw_proba).reshape(-1, 1)
+        return self.lr.predict_proba(arr)[:, 1]
+
+
+# =============================================================================
 # MODEL
 # =============================================================================
 
