@@ -560,6 +560,155 @@ def api_props(prop_date: str = Query(..., description="YYYY-MM-DD")):
 
 
 # ---------------------------------------------------------------------------
+# API: prop grading stats
+# ---------------------------------------------------------------------------
+
+@router.get("/api/prop_stats")
+def api_prop_stats():
+    check_sql = text("""
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'player_props' AND column_name = 'result'
+        )
+    """)
+    with engine.begin() as conn:
+        has_result = conn.execute(check_sql).scalar()
+
+    if not has_result:
+        return {"ok": True, "graded": False, "message": "Props not yet graded. Run scripts/grade_player_props.py first."}
+
+    # Overall totals
+    totals_sql = text("""
+        SELECT
+            result,
+            COUNT(*) AS cnt
+        FROM player_props
+        WHERE result IN ('WIN','LOSS','PUSH')
+        GROUP BY result
+    """)
+
+    # By prop type
+    by_type_sql = text("""
+        SELECT
+            prop_type,
+            COUNT(*) FILTER (WHERE result = 'WIN')  AS wins,
+            COUNT(*) FILTER (WHERE result = 'LOSS') AS losses,
+            COUNT(*) FILTER (WHERE result = 'PUSH') AS pushes,
+            COUNT(*) FILTER (WHERE result IN ('WIN','LOSS','PUSH')) AS total
+        FROM player_props
+        WHERE result IN ('WIN','LOSS','PUSH')
+        GROUP BY prop_type
+        ORDER BY total DESC
+    """)
+
+    # By pick direction
+    by_pick_sql = text("""
+        SELECT
+            pick,
+            COUNT(*) FILTER (WHERE result = 'WIN')  AS wins,
+            COUNT(*) FILTER (WHERE result = 'LOSS') AS losses,
+            COUNT(*) FILTER (WHERE result = 'PUSH') AS pushes
+        FROM player_props
+        WHERE result IN ('WIN','LOSS','PUSH')
+        GROUP BY pick
+    """)
+
+    # Daily breakdown
+    daily_sql = text("""
+        SELECT
+            prop_date::text AS prop_date,
+            COUNT(*) FILTER (WHERE result = 'WIN')  AS wins,
+            COUNT(*) FILTER (WHERE result = 'LOSS') AS losses,
+            COUNT(*) FILTER (WHERE result = 'PUSH') AS pushes,
+            COUNT(*) FILTER (WHERE result IN ('WIN','LOSS','PUSH')) AS total
+        FROM player_props
+        WHERE result IN ('WIN','LOSS','PUSH')
+        GROUP BY prop_date
+        ORDER BY prop_date DESC
+        LIMIT 30
+    """)
+
+    # Recent graded props
+    recent_sql = text("""
+        SELECT
+            prop_date::text AS prop_date,
+            player_name, player_team, prop_type,
+            line, projection, edge, pick, result, actual_value, confidence
+        FROM player_props
+        WHERE result IN ('WIN','LOSS','PUSH')
+        ORDER BY prop_date DESC, ABS(edge) DESC
+        LIMIT 100
+    """)
+
+    with engine.begin() as conn:
+        totals_rows  = conn.execute(totals_sql).fetchall()
+        by_type_rows = conn.execute(by_type_sql).fetchall()
+        by_pick_rows = conn.execute(by_pick_sql).fetchall()
+        daily_rows   = conn.execute(daily_sql).fetchall()
+        recent_rows  = conn.execute(recent_sql).fetchall()
+
+    totals_map = {r.result: r.cnt for r in totals_rows}
+    wins   = totals_map.get("WIN",  0)
+    losses = totals_map.get("LOSS", 0)
+    pushes = totals_map.get("PUSH", 0)
+    total  = wins + losses + pushes
+    wr     = round(wins / (wins + losses) * 100, 1) if (wins + losses) > 0 else 0
+
+    def wr_pct(w, l): return round(w / (w + l) * 100, 1) if (w + l) > 0 else 0
+
+    by_type = []
+    for r in by_type_rows:
+        by_type.append({
+            "prop_type": r.prop_type,
+            "wins": r.wins, "losses": r.losses, "pushes": r.pushes,
+            "total": r.total,
+            "win_pct": wr_pct(r.wins, r.losses),
+        })
+
+    by_pick = {}
+    for r in by_pick_rows:
+        by_pick[r.pick] = {
+            "wins": r.wins, "losses": r.losses, "pushes": r.pushes,
+            "win_pct": wr_pct(r.wins, r.losses),
+        }
+
+    daily = []
+    for r in daily_rows:
+        daily.append({
+            "date": r.prop_date,
+            "wins": r.wins, "losses": r.losses, "pushes": r.pushes,
+            "total": r.total,
+            "win_pct": wr_pct(r.wins, r.losses),
+        })
+
+    recent = []
+    for r in recent_rows:
+        recent.append({
+            "date":         r.prop_date,
+            "player_name":  r.player_name,
+            "player_team":  r.player_team,
+            "prop_type":    r.prop_type,
+            "line":         safe_float(r.line),
+            "projection":   safe_float(r.projection),
+            "edge":         safe_float(r.edge),
+            "pick":         r.pick,
+            "result":       r.result,
+            "actual_value": safe_float(r.actual_value),
+            "confidence":   r.confidence,
+        })
+
+    return {
+        "ok": True,
+        "graded": True,
+        "summary": {"wins": wins, "losses": losses, "pushes": pushes, "total": total, "win_pct": wr},
+        "by_type": by_type,
+        "by_pick": by_pick,
+        "daily":   daily,
+        "recent":  recent,
+    }
+
+
+# ---------------------------------------------------------------------------
 # API: AI chat (streaming via SSE)
 # ---------------------------------------------------------------------------
 

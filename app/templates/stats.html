@@ -381,6 +381,9 @@ async function load() {
 
       <div class="section-title">Recent picks</div>
       <div id="picks-table"></div>
+
+      <div class="section-title">Player prop results</div>
+      <div id="prop-stats-section"><div class="loading">Loading prop stats...</div></div>
     `;
 
     // Show filter bar
@@ -401,5 +404,130 @@ async function load() {
 }
 
 load();
+
+// ── Prop Stats ────────────────────────────────────────────────────────────────
+function propTypeLabel(t) {
+  return {
+    batter_hits:         'Hits',
+    batter_total_bases:  'Total Bases',
+    batter_home_runs:    'Home Runs',
+    batter_rbis:         'RBIs',
+    batter_runs_scored:  'Runs Scored',
+    batter_stolen_bases: 'Stolen Bases',
+    batter_walks:        'Walks',
+    pitcher_strikeouts:  'Strikeouts',
+    pitcher_outs:        'Pitcher Outs',
+  }[t] || t;
+}
+
+function propResultBadge(result) {
+  if (result === 'WIN')  return '<span class="badge win">✓ Win</span>';
+  if (result === 'LOSS') return '<span class="badge loss">✗ Loss</span>';
+  if (result === 'PUSH') return '<span class="badge pass">~ Push</span>';
+  return '<span class="badge pending">Pending</span>';
+}
+
+async function loadPropStats() {
+  const container = document.getElementById('prop-stats-section');
+  if (!container) return;
+
+  try {
+    const res  = await fetch('/api/prop_stats');
+    const data = await res.json();
+
+    if (!data.ok || !data.graded) {
+      container.innerHTML = `<div class="no-data" style="padding:1.5rem 0">
+        No graded prop results yet.<br>
+        <span style="font-size:.8rem;color:#94a3b8">Run: <code>heroku run python scripts/grade_player_props.py --app mlb-model</code></span>
+      </div>`;
+      return;
+    }
+
+    const s = data.summary;
+    const wr = s.win_pct;
+    const cl = wr >= 57 ? 'green' : wr >= 52.4 ? 'yellow' : 'red';
+
+    // Summary cards
+    const overD  = data.by_pick['OVER']  || {};
+    const underD = data.by_pick['UNDER'] || {};
+
+    const summaryHtml = `
+      <div class="card-grid" style="margin-bottom:1.5rem">
+        <div class="stat-card ${cl}">
+          <div class="label">Props Overall</div>
+          <div class="pct">${wr}%</div>
+          <div class="record mono">${s.wins}W – ${s.losses}L / ${s.total} graded</div>
+          <span class="edge">${((wr - 52.4) >= 0 ? '+' : '') + (wr - 52.4).toFixed(1)}% vs break-even</span>
+        </div>
+        <div class="stat-card ${overD.win_pct >= 57 ? 'green' : overD.win_pct >= 52.4 ? 'yellow' : 'red'}">
+          <div class="label">OVERs</div>
+          <div class="pct">${overD.win_pct || 0}%</div>
+          <div class="record mono">${overD.wins||0}W – ${overD.losses||0}L</div>
+        </div>
+        <div class="stat-card ${underD.win_pct >= 57 ? 'green' : underD.win_pct >= 52.4 ? 'yellow' : 'red'}">
+          <div class="label">UNDERs</div>
+          <div class="pct">${underD.win_pct || 0}%</div>
+          <div class="record mono">${underD.wins||0}W – ${underD.losses||0}L</div>
+        </div>
+      </div>`;
+
+    // By prop type table
+    const typeRows = data.by_type.map(r => {
+      const tc = r.win_pct >= 57 ? '#15803d' : r.win_pct >= 52.4 ? '#a16207' : '#be123c';
+      return `<tr>
+        <td><strong>${propTypeLabel(r.prop_type)}</strong></td>
+        <td class="mono" style="color:${tc};font-weight:700">${r.win_pct}%</td>
+        <td class="mono">${r.wins}W – ${r.losses}L</td>
+        <td class="mono" style="color:#94a3b8">${r.pushes}P</td>
+        <td class="mono">${r.total}</td>
+      </tr>`;
+    }).join('');
+
+    const typeTableHtml = `
+      <div class="chart-box" style="margin-bottom:1.5rem">
+        <h3>Win rate by prop type</h3>
+        <div style="overflow-x:auto">
+          <table class="results-table">
+            <thead><tr><th>Prop Type</th><th>Win %</th><th>Record</th><th>Push</th><th>Total</th></tr></thead>
+            <tbody>${typeRows}</tbody>
+          </table>
+        </div>
+      </div>`;
+
+    // Recent props table
+    const recentRows = data.recent.map(r => {
+      const rc = r.result === 'WIN' ? 'win-row' : r.result === 'LOSS' ? 'loss-row' : '';
+      const edgePct = r.edge != null ? (r.edge >= 0 ? '+' : '') + Math.round(r.edge * 1000)/10 + '%' : '—';
+      return `<tr class="${rc}">
+        <td class="mono" style="color:#94a3b8">${(r.date||'').slice(5)}</td>
+        <td><strong>${r.player_name}</strong><br><span class="sp-name">${r.player_team||''}</span></td>
+        <td>${propTypeLabel(r.prop_type)}</td>
+        <td class="mono">${r.pick} ${r.line}</td>
+        <td class="mono" style="color:#60a5fa">${r.projection != null ? r.projection.toFixed(3) : '—'}</td>
+        <td class="mono">${edgePct}</td>
+        <td class="mono">${r.actual_value != null ? r.actual_value : '—'}</td>
+        <td>${propResultBadge(r.result)}</td>
+      </tr>`;
+    }).join('');
+
+    const recentTableHtml = data.recent.length ? `
+      <div style="overflow-x:auto">
+        <table class="results-table">
+          <thead><tr>
+            <th>Date</th><th>Player</th><th>Prop</th><th>Pick</th><th>Projection</th><th>Edge</th><th>Actual</th><th>Result</th>
+          </tr></thead>
+          <tbody>${recentRows}</tbody>
+        </table>
+      </div>` : '<div class="no-data">No graded props yet.</div>';
+
+    container.innerHTML = summaryHtml + typeTableHtml + recentTableHtml;
+
+  } catch(err) {
+    console.error(err);
+    container.innerHTML = '<div class="no-data">Failed to load prop stats.</div>';
+  }
+}
+
+loadPropStats();
 </script>
 {% endblock %}
