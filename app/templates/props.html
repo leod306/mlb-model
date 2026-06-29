@@ -2,73 +2,58 @@
 {% block title %}Player Props{% endblock %}
 
 {% block content %}
-<header>
-  <h1>Player Props</h1>
-  <p>Edge Detection &bull; Hits &bull; Total Bases &bull; Home Runs &bull; Strikeouts &bull; Walks</p>
-</header>
-
-<div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-bottom:18px;">
-  <div>
-    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Date</label>
-    <input id="prop_date" type="date" value="{{ prop_date }}">
-  </div>
-  <div>
-    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Game</label>
-    <select id="gameFilter" style="min-width:150px;"><option value="">All Games</option></select>
-  </div>
-  <div>
-    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Prop Type</label>
-    <select id="propType">
-      <option value="">All Types</option>
-      <option value="batter_hits">Hits</option>
-      <option value="batter_total_bases">Total Bases</option>
-      <option value="batter_home_runs">Home Runs</option>
-      <option value="batter_rbis">RBIs</option>
-      <option value="batter_runs_scored">Runs Scored</option>
-      <option value="batter_hits_runs_rbis">H+R+RBI</option>
-      <option value="batter_stolen_bases">Stolen Bases</option>
-      <option value="batter_walks">Walks</option>
-      <option value="pitcher_strikeouts">Strikeouts</option>
-      <option value="pitcher_outs">Pitcher Outs</option>
-    </select>
-  </div>
-  <div>
-    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Side</label>
-    <select id="pickFilter">
-      <option value="">Both</option>
-      <option value="OVER">Overs</option>
-      <option value="UNDER">Unders</option>
-    </select>
-  </div>
-  <div>
-    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Confidence</label>
-    <select id="confFilter">
-      <option value="">All</option>
-      <option value="HIGH">High only</option>
-    </select>
-  </div>
-  <div>
-    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Search</label>
-    <input id="playerSearch" type="text" placeholder="Player name..." style="min-width:140px;">
-  </div>
-  <div style="display:flex;gap:8px;">
-    <button onclick="resetFilters()" style="background:var(--bg3);color:var(--text2);border-color:var(--border);">Reset</button>
-    <button onclick="loadProps()" style="background:var(--blue);color:white;border:none;">Load Props</button>
-  </div>
-</div>
-
-<div id="status" style="color:var(--text2);font-size:14px;margin-bottom:12px;">Loading...</div>
-<div id="summary"></div>
-<div id="cards"></div>
 
 <style>
+/* ── Filter bar ── */
+.props-header { margin-bottom: 1.5rem; }
+.props-header h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -.02em; margin-bottom: .2rem; }
+.props-header p  { color: var(--text3); font-size: .875rem; }
+
+.filter-bar {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 14px; padding: .75rem 1rem;
+  margin-bottom: 1.25rem; display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
+}
+.filter-row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; width: 100%; }
+.filter-row + .filter-row { padding-top: .5rem; border-top: 1px solid var(--border); }
+.flabel {
+  font-size: .7rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .07em; color: var(--text3); align-self: center; margin-right: .1rem; white-space: nowrap;
+}
+.fdivider { width: 1px; background: var(--border); align-self: stretch; margin: 0 .2rem; }
+.fgroup { display: flex; gap: .25rem; background: var(--bg2); border-radius: 8px; padding: 3px; }
+.fb {
+  padding: 4px 11px; border-radius: 6px; border: none; background: transparent;
+  font-size: .78rem; font-weight: 500; color: var(--text2); cursor: pointer;
+  transition: all .12s; white-space: nowrap;
+}
+.fb:hover { background: var(--border); color: var(--text1); }
+.fb.active { background: var(--bg3); color: var(--text1); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+.fselect {
+  padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border);
+  font-size: .78rem; color: var(--text1); background: var(--bg2); cursor: pointer;
+}
+.fsearch {
+  padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);
+  font-size: .78rem; color: var(--text1); background: var(--bg2); min-width: 130px;
+}
+.fsearch::placeholder { color: var(--text3); }
+.fdate {
+  padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border);
+  font-size: .78rem; color: var(--text1); background: var(--bg2); cursor: pointer;
+}
+.fcount { font-size: .78rem; color: var(--text3); margin-left: auto; white-space: nowrap; }
+.fcount strong { color: var(--text1); }
+.load-btn {
+  padding: 5px 14px; border-radius: 6px; border: none;
+  background: var(--blue); color: #fff; font-size: .78rem; font-weight: 600; cursor: pointer;
+}
+.load-btn:hover { opacity: .85; }
+
 .prop-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 16px 18px;
-  margin-bottom: 10px;
-  transition: border-color 0.15s;
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 16px 18px;
+  margin-bottom: 10px; transition: border-color 0.15s;
 }
 .prop-card:hover { border-color: var(--border2); }
 .prop-card.high-conf { border-color: #065f46; }
@@ -92,28 +77,101 @@
 .conf-fill { height:100%; border-radius:99px; background:linear-gradient(90deg,#3b82f6,#10b981); }
 .no-props { padding:48px; text-align:center; color:var(--text3); font-size:14px; }
 </style>
+
+<div class="props-header">
+  <h1>Player Props</h1>
+  <p>Edge detection across all prop markets · Min edge 8% · Min 2 books each side</p>
+</div>
+
+<div class="filter-bar">
+  <!-- Row 1: Date, Game, Pick, Confidence, Search, Load -->
+  <div class="filter-row">
+    <span class="flabel">Date</span>
+    <input id="prop_date" type="date" class="fdate" value="{{ prop_date }}" onchange="loadProps()">
+    <div class="fdivider"></div>
+    <span class="flabel">Game</span>
+    <select id="gameFilter" class="fselect" style="min-width:140px;"><option value="">All Games</option></select>
+    <div class="fdivider"></div>
+    <span class="flabel">Pick</span>
+    <div class="fgroup" id="pickGroup">
+      <button class="fb active" onclick="setPick('')">All</button>
+      <button class="fb" onclick="setPick('OVER')">OVER</button>
+      <button class="fb" onclick="setPick('UNDER')">UNDER</button>
+    </div>
+    <div class="fdivider"></div>
+    <span class="flabel">Conf</span>
+    <div class="fgroup" id="confGroup">
+      <button class="fb active" onclick="setConf('')">All</button>
+      <button class="fb" onclick="setConf('HIGH')">High only</button>
+    </div>
+    <div class="fdivider"></div>
+    <input id="playerSearch" type="text" class="fsearch" placeholder="Search player…">
+    <span class="fcount" id="propCount"></span>
+  </div>
+  <!-- Row 2: Prop type pills -->
+  <div class="filter-row">
+    <span class="flabel">Prop</span>
+    <div class="fgroup" id="typeGroup" style="flex-wrap:wrap;">
+      <button class="fb active" onclick="setType('')">All</button>
+      <button class="fb" onclick="setType('batter_hits')">Hits</button>
+      <button class="fb" onclick="setType('batter_total_bases')">Total Bases</button>
+      <button class="fb" onclick="setType('batter_home_runs')">Home Runs</button>
+      <button class="fb" onclick="setType('batter_rbis')">RBIs</button>
+      <button class="fb" onclick="setType('batter_runs_scored')">Runs Scored</button>
+      <button class="fb" onclick="setType('batter_hits_runs_rbis')">H+R+RBI</button>
+      <button class="fb" onclick="setType('batter_stolen_bases')">Stolen Bases</button>
+      <button class="fb" onclick="setType('batter_walks')">Walks</button>
+      <button class="fb" onclick="setType('pitcher_strikeouts')">Pitcher Ks</button>
+      <button class="fb" onclick="setType('pitcher_outs')">Pitcher Outs</button>
+    </div>
+  </div>
+</div>
+
+<div id="status" style="color:var(--text2);font-size:14px;margin-bottom:12px;"></div>
+<div id="summary"></div>
+<div id="cards"></div>
+
 {% endblock %}
 
 {% block scripts %}
 <script>
-const TYPE_LABEL={batter_hits:"Hits",batter_total_bases:"Total Bases",batter_home_runs:"Home Runs",batter_rbis:"RBIs",batter_runs_scored:"Runs",batter_hits_runs_rbis:"H+R+RBI",batter_stolen_bases:"Stolen Bases",batter_walks:"Walks",pitcher_strikeouts:"Strikeouts",pitcher_outs:"Pitcher Outs"};
+const TYPE_LABEL={batter_hits:"Hits",batter_total_bases:"Total Bases",batter_home_runs:"Home Runs",batter_rbis:"RBIs",batter_runs_scored:"Runs",batter_hits_runs_rbis:"H+R+RBI",batter_stolen_bases:"Stolen Bases",batter_walks:"Walks",pitcher_strikeouts:"Pitcher Ks",pitcher_outs:"Pitcher Outs"};
 const TYPE_CLS={batter_hits:"badge-hits",batter_total_bases:"badge-tb",batter_home_runs:"badge-hr",batter_rbis:"badge-hits",batter_runs_scored:"badge-hits",batter_hits_runs_rbis:"badge-tb",batter_stolen_bases:"badge-bb",batter_walks:"badge-bb",pitcher_strikeouts:"badge-ks",pitcher_outs:"badge-ks"};
-let allProps=[];
+
+let allProps = [];
+let fType = '', fPick = '', fConf = '', fGame = '';
+
+function setActive(groupEl, btn) {
+  groupEl.querySelectorAll('.fb').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+function setType(v) {
+  fType = v;
+  setActive(document.getElementById('typeGroup'), event.target);
+  renderCards();
+}
+function setPick(v) {
+  fPick = v;
+  setActive(document.getElementById('pickGroup'), event.target);
+  renderCards();
+}
+function setConf(v) {
+  fConf = v;
+  setActive(document.getElementById('confGroup'), event.target);
+  renderCards();
+}
 
 function fmt(x,d=2){if(x==null||isNaN(+x))return"—";return(+x).toFixed(d);}
-function fmtPrice(p){if(p==null)return"—";const n=+p;const cls=n<0?"text-gold":"text-green";return`<span class="${cls}">${n>0?"+":""}${n}</span>`;}
-function fmtEdge(e){if(e==null)return"—";const n=+e;const pct=(n>=0?"+":"")+Math.round(n*1000)/10+"%";const cls=n>=0?"text-green":"text-red";return`<span class="${cls}" style="font-weight:700">${pct}</span>`;}
+function fmtPrice(p){if(p==null)return"—";const n=+p;return`<span class="${n<0?"text-gold":"text-green"}">${n>0?"+":""}${n}</span>`;}
+function fmtEdge(e){if(e==null)return"—";const n=+e;const pct=(n>=0?"+":"")+Math.round(n*1000)/10+"%";return`<span class="${n>=0?"text-green":"text-red"}" style="font-weight:700">${pct}</span>`;}
 
 function cardHTML(p,i){
   const mu=p.home_team&&p.away_team?`${p.away_team} @ ${p.home_team}`:"—";
   const tl=TYPE_LABEL[p.prop_type]||p.prop_type;
   const tc=TYPE_CLS[p.prop_type]||"";
-  const pc=p.pick==="OVER"?"badge-over":"badge-under";
-  const cc=p.confidence==="HIGH"?"badge-high":"badge-med";
   const price=p.pick==="OVER"?p.over_price:p.under_price;
-  const isHigh=p.confidence==="HIGH";
   const projPct=Math.round(Math.min(Math.abs(p.edge||0)/0.20*100,100));
-  return`<div class="prop-card ${isHigh?"high-conf":""}">
+  return`<div class="prop-card ${p.confidence==="HIGH"?"high-conf":""}">
     <div class="prop-header">
       <div>
         <div class="prop-player">${p.player_name||"—"}</div>
@@ -121,8 +179,8 @@ function cardHTML(p,i){
       </div>
       <div class="prop-badges">
         <span class="badge ${tc}">${tl}</span>
-        <span class="badge ${pc}">${p.pick}</span>
-        <span class="badge ${cc}">${p.confidence}</span>
+        <span class="badge ${p.pick==="OVER"?"badge-over":"badge-under"}">${p.pick}</span>
+        <span class="badge ${p.confidence==="HIGH"?"badge-high":"badge-med"}">${p.confidence}</span>
       </div>
     </div>
     <div class="prop-grid">
@@ -136,23 +194,20 @@ function cardHTML(p,i){
   </div>`;
 }
 
-function populateDropdowns(){
+function populateGameFilter(){
   const games=[...new Set(allProps.filter(p=>p.home_team&&p.away_team).map(p=>`${p.away_team} @ ${p.home_team}`))].sort();
   document.getElementById("gameFilter").innerHTML='<option value="">All Games</option>'+games.map(g=>`<option value="${g}">${g}</option>`).join("");
 }
 
 function filterProps(){
-  const game=document.getElementById("gameFilter").value;
-  const type=document.getElementById("propType").value;
-  const pick=document.getElementById("pickFilter").value;
-  const conf=document.getElementById("confFilter").value;
   const q=document.getElementById("playerSearch").value.trim().toLowerCase();
+  fGame=document.getElementById("gameFilter").value;
   return allProps.filter(p=>{
     const mu=p.home_team&&p.away_team?`${p.away_team} @ ${p.home_team}`:"";
-    if(game&&mu!==game)return false;
-    if(type&&p.prop_type!==type)return false;
-    if(pick&&p.pick!==pick)return false;
-    if(conf==="HIGH"&&p.confidence!=="HIGH")return false;
+    if(fGame&&mu!==fGame)return false;
+    if(fType&&p.prop_type!==fType)return false;
+    if(fPick&&p.pick!==fPick)return false;
+    if(fConf==="HIGH"&&p.confidence!=="HIGH")return false;
     if(q&&!(p.player_name||"").toLowerCase().includes(q))return false;
     return true;
   });
@@ -163,6 +218,7 @@ function renderCards(){
   const highs=filtered.filter(p=>p.confidence==="HIGH").length;
   const overs=filtered.filter(p=>p.pick==="OVER").length;
   const unders=filtered.filter(p=>p.pick==="UNDER").length;
+  document.getElementById("propCount").innerHTML=`<strong>${filtered.length}</strong> of ${allProps.length} props`;
   document.getElementById("summary").innerHTML=filtered.length===0?"": `
     <div class="summary-bar">
       <div class="summary-stat"><div class="val">${filtered.length}</div><div class="lbl">Total Edges</div></div>
@@ -180,18 +236,17 @@ function explainProp(i){
   const p=window._filteredProps[i];if(!p)return;
   const tl=TYPE_LABEL[p.prop_type]||p.prop_type;
   const mu=p.home_team&&p.away_team?`${p.away_team} @ ${p.home_team}`:"unknown game";
-  const edgePct=Math.round((p.edge||0)*1000)/10;
   window.explainPick(
     `Explain why the model likes ${p.player_name} ${p.pick} ${p.line} ${tl} in ${mu}.`,
     {player:p.player_name,prop:tl,line:p.line,pick:p.pick,projection:p.projection,
-     edge_pct:edgePct+"%",confidence:p.confidence,over_price:p.over_price,
-     under_price:p.under_price,bookmakers:p.bookmakers_used,matchup:mu,team:p.player_team}
+     edge_pct:Math.round((p.edge||0)*1000)/10+"%",confidence:p.confidence,
+     over_price:p.over_price,under_price:p.under_price,bookmakers:p.bookmakers_used,matchup:mu,team:p.player_team}
   );
 }
 
 async function loadProps(){
   const d=document.getElementById("prop_date").value;
-  document.getElementById("status").textContent="Loading...";
+  document.getElementById("status").textContent="Loading…";
   document.getElementById("summary").innerHTML="";
   document.getElementById("cards").innerHTML="";
   allProps=[];
@@ -199,18 +254,21 @@ async function loadProps(){
     const data=await(await fetch(`/api/props?prop_date=${encodeURIComponent(d)}`)).json();
     if(!data.ok||data.message){document.getElementById("status").textContent=data.message||"API error.";return;}
     allProps=data.props||[];
-    if(!allProps.length){document.getElementById("status").textContent=`No edges for ${d}. Run load_player_props.py first.`;return;}
-    document.getElementById("status").textContent=`${data.count} edge plays for ${d}.`;
-    populateDropdowns();renderCards();
+    document.getElementById("status").textContent="";
+    if(!allProps.length){document.getElementById("cards").innerHTML=`<div class="no-props">No edges for ${d}. Run load_player_props.py first.</div>`;return;}
+    populateGameFilter();renderCards();
   }catch(e){document.getElementById("status").textContent="Error loading props.";}
 }
 
-function resetFilters(){
-  ["gameFilter","propType","pickFilter","confFilter"].forEach(id=>document.getElementById(id).value="");
-  document.getElementById("playerSearch").value="";renderCards();
-}
-["gameFilter","propType","pickFilter","confFilter"].forEach(id=>document.getElementById(id).addEventListener("change",renderCards));
+document.getElementById("gameFilter").addEventListener("change",renderCards);
 document.getElementById("playerSearch").addEventListener("input",renderCards);
-document.addEventListener("DOMContentLoaded",loadProps);
+
+// Wire up group IDs after DOM ready
+document.addEventListener("DOMContentLoaded",()=>{
+  document.getElementById('typeGroup').querySelectorAll('.fb')[0].classList.add('active');
+  document.getElementById('pickGroup').querySelectorAll('.fb')[0].classList.add('active');
+  document.getElementById('confGroup').querySelectorAll('.fb')[0].classList.add('active');
+  loadProps();
+});
 </script>
 {% endblock %}
