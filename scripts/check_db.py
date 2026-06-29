@@ -1,22 +1,22 @@
-import os, psycopg2
-from dotenv import load_dotenv
-load_dotenv('/Users/leodahlen/PycharmProjects/mlb-model/.env')
+from app.db import engine
+from sqlalchemy import text
 
-DATABASE_URL = os.getenv("DATABASE_URL","").replace("postgresql+psycopg2://","postgresql://",1)
-c = psycopg2.connect(DATABASE_URL)
-cur = c.cursor()
+with engine.begin() as conn:
+    # Graded results
+    r = conn.execute(text("SELECT result, COUNT(*) FROM player_props WHERE result IS NOT NULL GROUP BY result")).fetchall()
+    print("Graded counts:", list(r))
 
-cur.execute("SELECT COUNT(*) FROM lineups")
-print("Total rows:", cur.fetchone()[0])
+    # Total and by date
+    r2 = conn.execute(text("SELECT COUNT(*) FROM player_props")).scalar()
+    print("Total rows:", r2)
 
-cur.execute("SELECT official_date, COUNT(*) FROM lineups GROUP BY official_date ORDER BY official_date DESC LIMIT 5")
-print("Dates:", cur.fetchall())
-
-cur.execute("SELECT game_pk, side, COUNT(*), MIN(player_id), MAX(player_id) FROM lineups WHERE official_date = '2026-05-26' GROUP BY game_pk, side LIMIT 10")
-print("Today's games:", cur.fetchall())
-cur.execute("""
-    SELECT game_pk, home_sp_name, home_sp_id, away_sp_name, away_sp_id 
-    FROM game_probables 
-    WHERE game_pk IN (822811, 822898, 823294) 
-""")
-print("Probables:", cur.fetchall())
+    r3 = conn.execute(text("""
+        SELECT prop_date::text, 
+               COUNT(*) as total,
+               COUNT(*) FILTER (WHERE result IS NOT NULL) as graded
+        FROM player_props 
+        GROUP BY prop_date 
+        ORDER BY prop_date DESC 
+        LIMIT 5
+    """)).fetchall()
+    print("By date (total / graded):", [(r[0], r[1], r[2]) for r in r3])
