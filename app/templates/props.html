@@ -23,8 +23,13 @@
       <option value="batter_hits">Hits</option>
       <option value="batter_total_bases">Total Bases</option>
       <option value="batter_home_runs">Home Runs</option>
-      <option value="pitcher_strikeouts">Strikeouts</option>
+      <option value="batter_rbis">RBIs</option>
+      <option value="batter_runs_scored">Runs Scored</option>
+      <option value="batter_hits_runs_rbis">H+R+RBI</option>
+      <option value="batter_stolen_bases">Stolen Bases</option>
       <option value="batter_walks">Walks</option>
+      <option value="pitcher_strikeouts">Strikeouts</option>
+      <option value="pitcher_outs">Pitcher Outs</option>
     </select>
   </div>
   <div>
@@ -91,8 +96,8 @@
 
 {% block scripts %}
 <script>
-const TYPE_LABEL={batter_hits:"Hits",batter_total_bases:"Total Bases",batter_home_runs:"Home Runs",pitcher_strikeouts:"Strikeouts",batter_walks:"Walks"};
-const TYPE_CLS={batter_hits:"badge-hits",batter_total_bases:"badge-tb",batter_home_runs:"badge-hr",pitcher_strikeouts:"badge-ks",batter_walks:"badge-bb"};
+const TYPE_LABEL={batter_hits:"Hits",batter_total_bases:"Total Bases",batter_home_runs:"Home Runs",batter_rbis:"RBIs",batter_runs_scored:"Runs",batter_hits_runs_rbis:"H+R+RBI",batter_stolen_bases:"Stolen Bases",batter_walks:"Walks",pitcher_strikeouts:"Strikeouts",pitcher_outs:"Pitcher Outs"};
+const TYPE_CLS={batter_hits:"badge-hits",batter_total_bases:"badge-tb",batter_home_runs:"badge-hr",batter_rbis:"badge-hits",batter_runs_scored:"badge-hits",batter_hits_runs_rbis:"badge-tb",batter_stolen_bases:"badge-bb",batter_walks:"badge-bb",pitcher_strikeouts:"badge-ks",pitcher_outs:"badge-ks"};
 let allProps=[];
 
 function fmt(x,d=2){if(x==null||isNaN(+x))return"—";return(+x).toFixed(d);}

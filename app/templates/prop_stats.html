@@ -117,11 +117,13 @@ const BREAK_EVEN = 52.4;
 const PROP_LABELS = {
   batter_hits: 'Hits', batter_total_bases: 'Total Bases', batter_home_runs: 'Home Runs',
   batter_rbis: 'RBIs', batter_runs_scored: 'Runs Scored', batter_stolen_bases: 'Stolen Bases',
-  batter_walks: 'Walks', pitcher_strikeouts: 'Pitcher Ks', pitcher_outs: 'Pitcher Outs',
+  batter_walks: 'Walks', batter_hits_runs_rbis: 'H+R+RBI',
+  pitcher_strikeouts: 'Pitcher Ks', pitcher_outs: 'Pitcher Outs',
 };
 
 let ALL_PROPS = [];
 let TEAMS = [];
+let PROP_TYPES = [];
 let filters = { days: 'all', prop_type: 'all', team: 'all', pick: 'all', result: 'all' };
 
 function cardColor(pct) {
@@ -197,7 +199,7 @@ function renderFilterBar(totalAll) {
     <span class="filter-label">Prop</span>
     <div class="filter-group">
       <button class="fb ${filters.prop_type==='all'?'active':''}" onclick="setFilter('prop_type','all')">All</button>
-      ${Object.entries(PROP_LABELS).map(([k,v]) => `<button class="fb ${filters.prop_type===k?'active':''}" onclick="setFilter('prop_type','${k}')">${v}</button>`).join('')}
+      ${PROP_TYPES.map(k => `<button class="fb ${filters.prop_type===k?'active':''}" onclick="setFilter('prop_type','${k}')">${PROP_LABELS[k]||k}</button>`).join('')}
     </div>
     <div class="filter-divider"></div>
     <span class="filter-label">Team</span>
@@ -320,6 +322,7 @@ async function init() {
     }
     ALL_PROPS = d.recent;
     TEAMS = [...new Set(ALL_PROPS.map(r => r.player_team).filter(Boolean))].sort();
+    PROP_TYPES = [...new Set(ALL_PROPS.map(r => r.prop_type).filter(Boolean))].sort();
     renderAll();
   } catch(e) {
     document.getElementById('ps-content').innerHTML = `<div class="no-data"><div class="icon">⚠️</div><p>Failed to load prop stats.</p></div>`;

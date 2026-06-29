@@ -51,8 +51,13 @@ PROP_MARKETS = [
     "batter_hits",
     "batter_total_bases",
     "batter_home_runs",
+    "batter_rbis",
+    "batter_runs_scored",
+    "batter_hits_runs_rbis",
+    "batter_stolen_bases",
     "pitcher_strikeouts",
     "batter_walks",
+    "pitcher_outs",
 ]
 
 # Bookmakers to average across
@@ -279,6 +284,9 @@ def load_season_batting_stats() -> pd.DataFrame:
                 "hits":        int(st.get("hits", 0) or 0),
                 "home_runs":   int(st.get("homeRuns", 0) or 0),
                 "walks":       int(st.get("baseOnBalls", 0) or 0),
+                "runs":         int(st.get("runs", 0) or 0),
+                "rbi":          int(st.get("rbi", 0) or 0),
+                "stolen_bases": int(st.get("stolenBases", 0) or 0),
             })
         log(f"  Season stats loaded: {len(rows)} batters")
         return pd.DataFrame(rows)
@@ -619,6 +627,139 @@ def project_walks(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFra
     return None
 
 
+def project_stolen_bases(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFrame,
+                         career_df: pd.DataFrame = None,
+                         season_df: pd.DataFrame = None) -> Optional[float]:
+    """SB per game ≈ (sb / PA) × 4.0. League avg ~0.02 SB/game per batter."""
+    LEAGUE_SB_RATE = 0.005  # per PA
+
+    row = _get_season_row(player_name, season_df, lineups_df)
+    if row is not None:
+        sb = _safe_float(row.get("stolen_bases")) or 0
+        pa = _safe_float(row.get("pa")) or 0
+        if pa >= 20:
+            sb_rate  = sb / pa
+            weight   = min(pa / 200.0, 1.0)
+            reg_rate = weight * sb_rate + (1 - weight) * LEAGUE_SB_RATE
+            return round(reg_rate * 4.0, 4)
+
+    return round(LEAGUE_SB_RATE * 4.0, 4)  # fallback to league avg
+
+
+def project_hits_runs_rbis(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFrame,
+                           career_df: pd.DataFrame = None,
+                           season_df: pd.DataFrame = None) -> Optional[float]:
+    """Combined H+R+RBI projection = hits_proj + runs_proj + rbi_proj."""
+    LEAGUE_RUN_RATE = 0.105
+    LEAGUE_RBI_RATE = 0.105
+
+    row = _get_season_row(player_name, season_df, lineups_df)
+    if row is not None:
+        pa  = _safe_float(row.get("pa")) or 0
+        avg = _safe_float(row.get("avg")) or LEAGUE_AVG
+        rs  = _safe_float(row.get("runs")) or 0
+        rbi = _safe_float(row.get("rbi")) or 0
+        if pa >= 20:
+            w       = min(pa / 200.0, 1.0)
+            h_proj  = (w * avg             + (1-w) * LEAGUE_AVG)     * 4.0
+            r_proj  = (w * (rs / pa)       + (1-w) * LEAGUE_RUN_RATE) * 4.0
+            ri_proj = (w * (rbi / pa)      + (1-w) * LEAGUE_RBI_RATE) * 4.0
+            return round(h_proj + r_proj + ri_proj, 3)
+
+    # Fallback: league average totals
+    return round((LEAGUE_AVG + LEAGUE_RUN_RATE + LEAGUE_RBI_RATE) * 4.0, 3)
+
+
+def project_runs_scored(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFrame,
+                        career_df: pd.DataFrame = None,
+                        season_df: pd.DataFrame = None) -> Optional[float]:
+    """Runs scored per game ≈ (runs / PA) × 4.0 PA. League avg ~0.42 R/game per batter."""
+    LEAGUE_RUN_RATE = 0.105  # runs per PA league avg (~0.42 over 4 PA)
+
+    row = _get_season_row(player_name, season_df, lineups_df)
+    if row is not None:
+        runs = _safe_float(row.get("runs")) or 0
+        pa   = _safe_float(row.get("pa")) or 0
+        if pa >= 20:
+            run_rate = runs / pa
+            weight   = min(pa / 200.0, 1.0)
+            reg_rate = weight * run_rate + (1 - weight) * LEAGUE_RUN_RATE
+            return round(reg_rate * 4.0, 3)
+
+    if career_df is None:
+        career_df = pd.DataFrame()
+    player_id = _get_player_id(player_name, lineups_df)
+    if player_id and not career_df.empty:
+        r = career_df[career_df["batter_id"] == player_id]
+        if not r.empty:
+            obp = _safe_float(r.iloc[0].get("obp"))
+            pa  = _safe_float(r.iloc[0].get("pa")) or 0
+            if obp is not None and pa >= 10:
+                # Estimate: ~33% of times on base result in a run
+                run_rate = obp * 0.33
+                weight   = min(pa / 100.0, 1.0)
+                reg_rate = weight * run_rate + (1 - weight) * LEAGUE_RUN_RATE
+                return round(reg_rate * 4.0, 3)
+
+    return None
+
+
+def project_rbis(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFrame,
+                 career_df: pd.DataFrame = None,
+                 season_df: pd.DataFrame = None) -> Optional[float]:
+    """RBIs per game ≈ (rbi / PA) × 4.0 PA. League avg ~0.42 RBI/game per batter."""
+    LEAGUE_RBI_RATE = 0.105  # rbi per PA
+
+    row = _get_season_row(player_name, season_df, lineups_df)
+    if row is not None:
+        rbi = _safe_float(row.get("rbi")) or 0
+        pa  = _safe_float(row.get("pa")) or 0
+        if pa >= 20:
+            rbi_rate = rbi / pa
+            weight   = min(pa / 200.0, 1.0)
+            reg_rate = weight * rbi_rate + (1 - weight) * LEAGUE_RBI_RATE
+            return round(reg_rate * 4.0, 3)
+
+    if career_df is None:
+        career_df = pd.DataFrame()
+    player_id = _get_player_id(player_name, lineups_df)
+    if player_id and not career_df.empty:
+        r = career_df[career_df["batter_id"] == player_id]
+        if not r.empty:
+            slg = _safe_float(r.iloc[0].get("slg"))
+            pa  = _safe_float(r.iloc[0].get("pa")) or 0
+            if slg is not None and pa >= 10:
+                # Estimate: RBI ≈ SLG × 0.28 per PA (rough empirical)
+                rbi_rate = slg * 0.28
+                weight   = min(pa / 100.0, 1.0)
+                reg_rate = weight * rbi_rate + (1 - weight) * LEAGUE_RBI_RATE
+                return round(reg_rate * 4.0, 3)
+
+    return None
+
+
+def project_pitcher_outs(pitcher_name: str, pgl_df: pd.DataFrame,
+                         season_pitch_df: pd.DataFrame = None) -> Optional[float]:
+    """Project pitcher outs recorded (IP × 3)."""
+    key = pitcher_name.strip().lower()
+
+    if not pgl_df.empty:
+        recent = pgl_df[pgl_df["pitcher_name_key"] == key].head(5)
+        if not recent.empty:
+            total_ip = _safe_float(recent["innings_pitched"].sum()) or 0
+            if total_ip >= 1:
+                avg_ip = total_ip / len(recent)
+                return round(avg_ip * 3.0, 2)
+
+    if season_pitch_df is not None and not season_pitch_df.empty:
+        match = season_pitch_df[season_pitch_df["pitcher_name"] == key]
+        if not match.empty:
+            avg_ip = _safe_float(match.iloc[0].get("avg_ip_per_start")) or 5.5
+            return round(avg_ip * 3.0, 2)
+
+    return None
+
+
 def project_strikeouts(pitcher_name: str, pgl_df: pd.DataFrame,
                        season_pitch_df: pd.DataFrame = None) -> Optional[float]:
     """
@@ -710,8 +851,18 @@ def score_prop(raw: Dict, lineups_df: pd.DataFrame, bvp_df: pd.DataFrame,
         proj = project_home_runs(player, bvp_df, lineups_df, cd, sd)
     elif prop_type == "batter_walks":
         proj = project_walks(player, bvp_df, lineups_df, cd, sd)
+    elif prop_type == "batter_hits_runs_rbis":
+        proj = project_hits_runs_rbis(player, bvp_df, lineups_df, cd, sd)
+    elif prop_type == "batter_stolen_bases":
+        proj = project_stolen_bases(player, bvp_df, lineups_df, cd, sd)
+    elif prop_type == "batter_runs_scored":
+        proj = project_runs_scored(player, bvp_df, lineups_df, cd, sd)
+    elif prop_type == "batter_rbis":
+        proj = project_rbis(player, bvp_df, lineups_df, cd, sd)
     elif prop_type == "pitcher_strikeouts":
         proj = project_strikeouts(player, pgl_df, spd)
+    elif prop_type == "pitcher_outs":
+        proj = project_pitcher_outs(player, pgl_df, spd)
     else:
         return None
 

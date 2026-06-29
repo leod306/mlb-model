@@ -35,16 +35,18 @@ from app.db import engine
 BOXSCORE_URL = "https://statsapi.mlb.com/api/v1/game/{game_pk}/boxscore"
 
 # prop_type -> (stat_side, mlb_api_key)
+# Use a list of keys to sum multiple stats (e.g. H+R+RBI)
 PROP_STAT_MAP = {
-    "batter_hits":        ("batting",  "hits"),
-    "batter_total_bases": ("batting",  "totalBases"),
-    "batter_home_runs":   ("batting",  "homeRuns"),
-    "batter_rbis":        ("batting",  "rbi"),
-    "batter_runs_scored": ("batting",  "runs"),
-    "batter_stolen_bases":("batting",  "stolenBases"),
-    "batter_walks":       ("batting",  "baseOnBalls"),
-    "pitcher_strikeouts": ("pitching", "strikeOuts"),
-    "pitcher_outs":       ("pitching", "outs"),
+    "batter_hits":            ("batting",  ["hits"]),
+    "batter_total_bases":     ("batting",  ["totalBases"]),
+    "batter_home_runs":       ("batting",  ["homeRuns"]),
+    "batter_rbis":            ("batting",  ["rbi"]),
+    "batter_runs_scored":     ("batting",  ["runs"]),
+    "batter_stolen_bases":    ("batting",  ["stolenBases"]),
+    "batter_walks":           ("batting",  ["baseOnBalls"]),
+    "batter_hits_runs_rbis":  ("batting",  ["hits", "runs", "rbi"]),
+    "pitcher_strikeouts":     ("pitching", ["strikeOuts"]),
+    "pitcher_outs":           ("pitching", ["outs"]),
 }
 
 
@@ -139,18 +141,19 @@ def grade_date(target_date: date) -> None:
                 skipped += 1
                 continue
 
-            side, stat_key = stat_info
+            side, stat_keys = stat_info
             pdata = player_stats.get(name_key) or fuzzy_match(name_key, player_stats)
             if pdata is None:
                 skipped += 1
                 continue
 
-            raw = pdata.get(side, {}).get(stat_key)
-            if raw is None:
+            stat_dict = pdata.get(side, {})
+            parts = [stat_dict.get(k) for k in stat_keys]
+            if any(p is None for p in parts):
                 skipped += 1
                 continue
 
-            actual = float(raw)
+            actual = float(sum(float(p) for p in parts))
             result = grade_result(actual, float(row.line), row.pick)
 
             if result == "WIN":   wins   += 1
