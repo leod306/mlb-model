@@ -18,8 +18,18 @@ from datetime import date, timedelta
 
 import requests
 from sqlalchemy import text
+from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+if os.getenv("DYNO") is None:
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(PROJECT_ROOT / ".env", override=False)
+    except Exception:
+        pass
+
 from app.db import engine
 
 BOXSCORE_URL = "https://statsapi.mlb.com/api/v1/game/{game_pk}/boxscore"
