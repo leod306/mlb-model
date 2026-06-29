@@ -91,6 +91,11 @@ def stats_page(request: Request):
     return templates.TemplateResponse("stats.html", {"request": request})
 
 
+@router.get("/prop-stats", response_class=HTMLResponse)
+def prop_stats_page(request: Request):
+    return templates.TemplateResponse("prop_stats.html", {"request": request})
+
+
 @router.get("/props", response_class=HTMLResponse)
 def props_page(request: Request, prop_date: Optional[str] = Query(default=None)):
     if not prop_date:

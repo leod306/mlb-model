@@ -1,0 +1,310 @@
+{% extends "base.html" %}
+{% block title %}Prop Results{% endblock %}
+{% block content %}
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700&display=swap');
+
+  .ps-wrap { max-width: 1100px; margin: 0 auto; padding: 2rem 1rem; }
+
+  .ps-header { margin-bottom: 2rem; }
+  .ps-header h1 { font-family: 'Syne', sans-serif; font-size: 2rem; font-weight: 700; letter-spacing: -.02em; margin-bottom: .25rem; }
+  .ps-header p  { color: #64748b; font-size: .9rem; }
+
+  /* Summary cards */
+  .card-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 2rem; }
+  .stat-card { border-radius: 14px; padding: 1.25rem 1.5rem; }
+  .stat-card.green  { background: #f0fdf4; border: 1px solid #bbf7d0; }
+  .stat-card.red    { background: #fff1f2; border: 1px solid #fecdd3; }
+  .stat-card.yellow { background: #fefce8; border: 1px solid #fde68a; }
+  .stat-card.gray   { background: #f8fafc; border: 1px solid #e2e8f0; }
+  .stat-card .label { font-size: .75rem; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: #94a3b8; margin-bottom: .5rem; }
+  .stat-card .pct   { font-family: 'Syne', sans-serif; font-size: 2.5rem; font-weight: 700; line-height: 1; margin-bottom: .25rem; }
+  .stat-card.green  .pct { color: #15803d; }
+  .stat-card.red    .pct { color: #be123c; }
+  .stat-card.yellow .pct { color: #a16207; }
+  .stat-card.gray   .pct { color: #334155; }
+  .stat-card .record { font-family: 'DM Mono', monospace; font-size: .8rem; color: #64748b; }
+  .stat-card .vs-be  { font-size: .75rem; font-weight: 600; margin-top: .4rem; padding: 2px 8px; border-radius: 20px; display: inline-block; }
+  .stat-card.green  .vs-be { background: #dcfce7; color: #15803d; }
+  .stat-card.red    .vs-be { background: #ffe4e6; color: #be123c; }
+  .stat-card.yellow .vs-be { background: #fef9c3; color: #a16207; }
+
+  .section-title {
+    font-family: 'Syne', sans-serif; font-size: 1rem; font-weight: 600;
+    color: #1e293b; margin: 2rem 0 1rem;
+    display: flex; align-items: center; gap: .5rem;
+  }
+  .section-title::after { content: ''; flex: 1; height: 1px; background: #e2e8f0; }
+
+  .chart-box {
+    background: #fff; border: 1px solid #e2e8f0; border-radius: 14px;
+    padding: 1.25rem; margin-bottom: 1.5rem;
+  }
+  .chart-box h3 {
+    font-size: .8rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .07em; color: #94a3b8; margin-bottom: 1rem;
+  }
+
+  /* Type breakdown table */
+  .type-table { width: 100%; border-collapse: collapse; font-size: .875rem; }
+  .type-table th {
+    text-align: left; font-size: .72rem; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .07em; color: #94a3b8;
+    padding: .5rem .75rem; border-bottom: 1px solid #f1f5f9;
+  }
+  .type-table th.r { text-align: right; }
+  .type-table td { padding: .6rem .75rem; border-bottom: 1px solid #f8fafc; color: #334155; }
+  .type-table td.r { text-align: right; font-family: 'DM Mono', monospace; font-size: .8rem; }
+  .type-table tr:last-child td { border-bottom: none; }
+  .type-table tr:hover td { background: #f8fafc; }
+
+  .pct-bar-wrap { display: flex; align-items: center; gap: .5rem; }
+  .pct-bar { height: 6px; border-radius: 3px; flex-shrink: 0; }
+  .pct-bar.win  { background: #22c55e; }
+  .pct-bar.mid  { background: #f59e0b; }
+  .pct-bar.loss { background: #f43f5e; }
+  .pct-val { font-family: 'DM Mono', monospace; font-size: .8rem; font-weight: 500; white-space: nowrap; }
+
+  /* Recent props table */
+  .recent-table { width: 100%; border-collapse: collapse; font-size: .8rem; }
+  .recent-table th {
+    text-align: left; font-size: .7rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .07em; color: #94a3b8; padding: .5rem .6rem;
+    border-bottom: 2px solid #f1f5f9; position: sticky; top: 0; background: #fff;
+  }
+  .recent-table th.r { text-align: right; }
+  .recent-table td { padding: .55rem .6rem; border-bottom: 1px solid #f8fafc; color: #334155; }
+  .recent-table td.r { text-align: right; font-family: 'DM Mono', monospace; }
+  .recent-table tr:last-child td { border-bottom: none; }
+  .recent-table tr:hover td { background: #f8fafc; }
+
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 20px;
+    font-size: .7rem; font-weight: 700; letter-spacing: .04em;
+  }
+  .badge.win  { background: #dcfce7; color: #15803d; }
+  .badge.loss { background: #ffe4e6; color: #be123c; }
+  .badge.push { background: #f1f5f9; color: #64748b; }
+  .badge.over  { background: #eff6ff; color: #1d4ed8; }
+  .badge.under { background: #fdf4ff; color: #7e22ce; }
+  .badge.high  { background: #fef9c3; color: #a16207; }
+
+  .table-scroll { max-height: 520px; overflow-y: auto; border-radius: 0 0 14px 14px; }
+
+  .no-data { text-align: center; padding: 3rem 1rem; color: #94a3b8; }
+  .no-data .icon { font-size: 2.5rem; margin-bottom: .75rem; }
+  .no-data p { font-size: .9rem; }
+  .no-data code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-size: .8rem; }
+
+  @media (max-width: 640px) {
+    .card-grid { grid-template-columns: 1fr 1fr; }
+    .card-grid .stat-card:last-child { grid-column: 1 / -1; }
+  }
+</style>
+
+<div class="ps-wrap">
+  <div class="ps-header">
+    <h1>Player Prop Results</h1>
+    <p>Graded picks vs actual MLB boxscore stats · Break-even = 52.4%</p>
+  </div>
+
+  <div id="ps-content">
+    <div class="no-data">
+      <div class="icon">⏳</div>
+      <p>Loading prop results…</p>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+const BREAK_EVEN = 52.4;
+
+const PROP_LABELS = {
+  batter_hits:         'Hits',
+  batter_total_bases:  'Total Bases',
+  batter_home_runs:    'Home Runs',
+  batter_rbis:         'RBIs',
+  batter_runs_scored:  'Runs Scored',
+  batter_stolen_bases: 'Stolen Bases',
+  batter_walks:        'Walks',
+  pitcher_strikeouts:  'Pitcher Ks',
+  pitcher_outs:        'Pitcher Outs',
+};
+
+function fmtPct(n) { return n != null ? n.toFixed(1) + '%' : '—'; }
+function fmtNum(n) { return n != null ? n.toFixed(2) : '—'; }
+function cardColor(pct) {
+  if (pct >= BREAK_EVEN + 2) return 'green';
+  if (pct >= BREAK_EVEN)      return 'yellow';
+  return 'red';
+}
+
+function renderCards(d) {
+  const overall = d.overall;
+  const wr = overall.win_pct;
+  const overs = d.by_pick.OVER  || {};
+  const unders = d.by_pick.UNDER || {};
+  const be_diff = (wr - BREAK_EVEN).toFixed(1);
+  const be_sign = be_diff >= 0 ? '+' : '';
+
+  const cards = [
+    { label: 'Overall', pct: wr, rec: `${overall.wins}W – ${overall.losses}L – ${overall.pushes}P of ${overall.total}`,
+      color: cardColor(wr), be: be_sign + be_diff + '% vs break-even' },
+    { label: 'OVERs', pct: overs.win_pct ?? 0,
+      rec: overs.wins != null ? `${overs.wins}W – ${overs.losses}L` : '—',
+      color: cardColor(overs.win_pct ?? 0), be: null },
+    { label: 'UNDERs', pct: unders.win_pct ?? 0,
+      rec: unders.wins != null ? `${unders.wins}W – ${unders.losses}L` : '—',
+      color: cardColor(unders.win_pct ?? 0), be: null },
+  ];
+
+  return `<div class="card-grid">` + cards.map(c => `
+    <div class="stat-card ${c.color}">
+      <div class="label">${c.label}</div>
+      <div class="pct">${fmtPct(c.pct)}</div>
+      <div class="record">${c.rec}</div>
+      ${c.be ? `<div class="vs-be">${c.be}</div>` : ''}
+    </div>`).join('') + `</div>`;
+}
+
+function renderTypeTable(by_type) {
+  if (!by_type.length) return '<p style="color:#94a3b8;font-size:.85rem;">No data yet.</p>';
+  const rows = by_type.map(r => {
+    const barW = Math.round((r.win_pct / 100) * 120);
+    const color = r.win_pct >= BREAK_EVEN + 2 ? '#22c55e' : r.win_pct >= BREAK_EVEN ? '#f59e0b' : '#f43f5e';
+    return `<tr>
+      <td>${PROP_LABELS[r.prop_type] || r.prop_type}</td>
+      <td class="r">${r.wins}</td>
+      <td class="r">${r.losses}</td>
+      <td class="r">${r.pushes}</td>
+      <td class="r">${r.total}</td>
+      <td class="r">
+        <div class="pct-bar-wrap">
+          <div class="pct-bar" style="width:${barW}px;background:${color}"></div>
+          <span class="pct-val" style="color:${color}">${fmtPct(r.win_pct)}</span>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+
+  return `<table class="type-table">
+    <thead><tr>
+      <th>Prop Type</th>
+      <th class="r">W</th><th class="r">L</th><th class="r">P</th>
+      <th class="r">Total</th><th class="r">Win %</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+function renderDailyChart(daily) {
+  const rev = [...daily].reverse();
+  return `<canvas id="dailyChart" height="80"></canvas>
+  <script>
+  (function(){
+    const ctx = document.getElementById('dailyChart').getContext('2d');
+    new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: ${JSON.stringify(rev.map(d => d.date))},
+        datasets: [
+          {
+            label: 'Win %',
+            data: ${JSON.stringify(rev.map(d => d.win_pct))},
+            borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,.08)',
+            fill: true, tension: .35, pointRadius: 3, pointHoverRadius: 5,
+          },
+          {
+            label: 'Break-even',
+            data: Array(${rev.length}).fill(52.4),
+            borderColor: '#94a3b8', borderDash: [5,4], borderWidth: 1.5,
+            pointRadius: 0, fill: false,
+          }
+        ]
+      },
+      options: {
+        responsive: true, plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } },
+        scales: {
+          y: { min: 0, max: 100, ticks: { callback: v => v + '%' }, grid: { color: '#f1f5f9' } },
+          x: { ticks: { font: { size: 10 }, maxRotation: 45 }, grid: { display: false } }
+        }
+      }
+    });
+  })();
+  <\/script>`;
+}
+
+function renderRecentTable(recent) {
+  if (!recent.length) return '<p style="color:#94a3b8;font-size:.85rem;padding:1rem">No graded props yet.</p>';
+  const rows = recent.map(r => {
+    const res_cls = r.result === 'WIN' ? 'win' : r.result === 'LOSS' ? 'loss' : 'push';
+    const pick_cls = r.pick === 'OVER' ? 'over' : 'under';
+    const edge_sign = r.edge > 0 ? '+' : '';
+    const edge_color = r.edge > 0 ? '#15803d' : '#be123c';
+    return `<tr>
+      <td>${r.date}</td>
+      <td><strong>${r.player_name}</strong><br><span style="color:#94a3b8;font-size:.7rem">${r.player_team}</span></td>
+      <td>${PROP_LABELS[r.prop_type] || r.prop_type}</td>
+      <td class="r">${r.line ?? '—'}</td>
+      <td class="r">${r.projection != null ? r.projection.toFixed(2) : '—'}</td>
+      <td class="r" style="color:${edge_color};font-weight:600">${edge_sign}${r.edge != null ? (r.edge*100).toFixed(1) : '—'}%</td>
+      <td><span class="badge ${pick_cls}">${r.pick}</span></td>
+      <td class="r">${r.actual_value ?? '—'}</td>
+      <td><span class="badge ${res_cls}">${r.result}</span></td>
+    </tr>`;
+  }).join('');
+
+  return `<div class="table-scroll">
+    <table class="recent-table">
+      <thead><tr>
+        <th>Date</th><th>Player</th><th>Prop</th>
+        <th class="r">Line</th><th class="r">Proj</th><th class="r">Edge</th>
+        <th>Pick</th><th class="r">Actual</th><th>Result</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+async function loadPropStats() {
+  const el = document.getElementById('ps-content');
+  try {
+    const res = await fetch('/api/prop_stats');
+    const d = await res.json();
+
+    if (!d.ok || d.graded === false) {
+      el.innerHTML = `<div class="no-data">
+        <div class="icon">📊</div>
+        <p>No graded props yet.<br>Run <code>heroku run python scripts/grade_player_props.py --app mlb-model</code> to grade yesterday's picks.</p>
+      </div>`;
+      return;
+    }
+
+    el.innerHTML = `
+      ${renderCards(d)}
+
+      <div class="section-title">Win Rate by Prop Type</div>
+      <div class="chart-box">${renderTypeTable(d.by_type)}</div>
+
+      <div class="section-title">Daily Win % Trend</div>
+      <div class="chart-box">
+        <h3>Last 30 Days</h3>
+        ${d.daily.length ? renderDailyChart(d.daily) : '<p style="color:#94a3b8;font-size:.85rem">No daily data yet.</p>'}
+      </div>
+
+      <div class="section-title">Recent Graded Props</div>
+      <div class="chart-box" style="padding:0;overflow:hidden">
+        ${renderRecentTable(d.recent)}
+      </div>
+    `;
+  } catch(e) {
+    el.innerHTML = `<div class="no-data"><div class="icon">⚠️</div><p>Failed to load prop stats.</p></div>`;
+  }
+}
+
+loadPropStats();
+</script>
+
+{% endblock %}
