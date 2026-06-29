@@ -66,9 +66,10 @@ BOOKMAKERS = "draftkings,fanduel,betmgm,betonlineag,betrivers"
 # Minimum edge to flag as a play — 8% keeps ~10-15% of props as edges
 MIN_EDGE = 0.08
 # Maximum plausible edge — anything above this is likely a data artifact
-MAX_EDGE = 0.20
+MAX_EDGE = 0.25
 # Minimum books required on each side to trust the line
-MIN_BOOKS_EACH_SIDE = 2
+# 1 allows niche markets (HR, walks, stolen bases) that fewer books post
+MIN_BOOKS_EACH_SIDE = 1
 
 # League average fallbacks
 LEAGUE_AVG   = 0.255
@@ -183,34 +184,34 @@ def fetch_props_for_event(event_id: str, home_team: str, away_team: str) -> List
         return []
 
     results = []
-    # Fetch one market at a time to stay within URL length limits
-    for market in PROP_MARKETS:
-        url = f"{ODDS_API_BASE}/sports/baseball_mlb/events/{event_id}/odds"
-        params = {
-            "apiKey":      ODDS_API_KEY,
-            "regions":     "us",
-            "markets":     market,
-            "bookmakers":  BOOKMAKERS,
-            "oddsFormat":  "american",
-        }
-        try:
-            r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
-            if r.status_code == 404:
+    # Fetch all markets in one call per game (much faster — 1 call vs 10)
+    url = f"{ODDS_API_BASE}/sports/baseball_mlb/events/{event_id}/odds"
+    params = {
+        "apiKey":      ODDS_API_KEY,
+        "regions":     "us",
+        "markets":     ",".join(PROP_MARKETS),
+        "bookmakers":  BOOKMAKERS,
+        "oddsFormat":  "american",
+    }
+    try:
+        r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
+        if r.status_code == 404:
+            return []
+        r.raise_for_status()
+        all_data = r.json()
+    except Exception as e:
+        log(f"  Props fetch failed: {e}")
+        return []
+
+    # Aggregate prices per player+line+market across bookmakers
+    player_data: Dict[str, Dict] = {}
+
+    for bookmaker in all_data.get("bookmakers", []):
+        for mkt in bookmaker.get("markets", []):
+            market = mkt.get("key", "")
+            if market not in PROP_MARKETS:
                 continue
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            log(f"  Props fetch failed ({market}): {e}")
-            continue
-
-        # Aggregate prices per player+line across bookmakers
-        player_data: Dict[str, Dict] = {}
-
-        for bookmaker in data.get("bookmakers", []):
-            for mkt in bookmaker.get("markets", []):
-                if mkt.get("key") != market:
-                    continue
-                for outcome in mkt.get("outcomes", []):
+            for outcome in mkt.get("outcomes", []):
                     player = outcome.get("description", "")
                     side   = outcome.get("name", "")   # Over / Under
                     price  = _safe_float(outcome.get("price"))
@@ -219,7 +220,7 @@ def fetch_props_for_event(event_id: str, home_team: str, away_team: str) -> List
                     if not player or price is None or line is None:
                         continue
 
-                    key = f"{player}|{line}"
+                    key = f"{player}|{market}|{line}"
                     if key not in player_data:
                         player_data[key] = {
                             "player_name": player,
@@ -236,8 +237,7 @@ def fetch_props_for_event(event_id: str, home_team: str, away_team: str) -> List
                     elif side == "Under":
                         player_data[key]["under_prices"].append(price)
 
-        results.extend(player_data.values())
-
+    results.extend(player_data.values())
     return results
 
 
