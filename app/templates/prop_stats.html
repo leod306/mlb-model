@@ -3,113 +3,97 @@
 {% block content %}
 
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700&display=swap');
-
-  .ps-wrap { max-width: 1100px; margin: 0 auto; padding: 2rem 1rem; }
-
-  .ps-header { margin-bottom: 1.5rem; }
-  .ps-header h1 { font-family: 'Syne', sans-serif; font-size: 2rem; font-weight: 700; letter-spacing: -.02em; margin-bottom: .25rem; }
-  .ps-header p  { color: #64748b; font-size: .9rem; }
-
-  /* Filter bar */
+  /* Filter bar — matches props page */
   .filter-bar {
-    display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
-    background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 14px;
-    padding: .75rem 1rem; margin-bottom: 1.5rem;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: .75rem 1rem;
+    margin-bottom: 1.25rem; display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
   }
-  .filter-group { display: flex; gap: .25rem; background: #f1f5f9; border-radius: 8px; padding: 3px; }
-  .filter-label {
-    font-size: .7rem; font-weight: 600; text-transform: uppercase;
-    letter-spacing: .07em; color: #94a3b8; align-self: center; margin-right: .1rem;
-  }
-  .filter-divider { width: 1px; background: #e2e8f0; align-self: stretch; margin: 0 .25rem; }
-  .fb { padding: 4px 11px; border-radius: 6px; border: none; background: transparent; font-size: .78rem; font-weight: 500; color: #64748b; cursor: pointer; transition: all .12s; white-space: nowrap; }
-  .fb:hover { background: #e2e8f0; color: #334155; }
-  .fb.active { background: #fff; color: #1e293b; font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
-  .filter-select {
-    padding: 4px 8px; border-radius: 6px; border: 1px solid #e2e8f0;
-    font-size: .78rem; color: #334155; background: #fff; cursor: pointer;
-  }
-  .filter-count { font-size: .78rem; color: #94a3b8; margin-left: auto; }
-  .filter-count strong { color: #334155; }
+  .filter-row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; width: 100%; }
+  .filter-row + .filter-row { padding-top: .5rem; border-top: 1px solid var(--border); }
+  .flabel { font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--text3); align-self: center; margin-right: .1rem; white-space: nowrap; }
+  .fdivider { width: 1px; background: var(--border); align-self: stretch; margin: 0 .2rem; }
+  .fgroup { display: flex; gap: .25rem; background: var(--bg2); border-radius: 8px; padding: 3px; flex-wrap: wrap; }
+  .fb { padding: 4px 11px; border-radius: 6px; border: none; background: transparent; font-size: .78rem; font-weight: 500; color: var(--text2); cursor: pointer; transition: all .12s; white-space: nowrap; }
+  .fb:hover { background: var(--border); color: var(--text1); }
+  .fb.active { background: var(--bg3); color: var(--text1); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+  .fselect { padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); font-size: .78rem; color: var(--text1); background: var(--bg2); cursor: pointer; }
+  .filter-count { font-size: .78rem; color: var(--text3); margin-left: auto; }
+  .filter-count strong { color: var(--text1); }
 
   /* Summary cards */
   .card-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 2rem; }
   .stat-card { border-radius: 14px; padding: 1.25rem 1.5rem; }
-  .stat-card.green  { background: #f0fdf4; border: 1px solid #bbf7d0; }
-  .stat-card.red    { background: #fff1f2; border: 1px solid #fecdd3; }
-  .stat-card.yellow { background: #fefce8; border: 1px solid #fde68a; }
-  .stat-card .label { font-size: .75rem; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: #94a3b8; margin-bottom: .5rem; }
-  .stat-card .pct   { font-family: 'Syne', sans-serif; font-size: 2.5rem; font-weight: 700; line-height: 1; margin-bottom: .25rem; }
-  .stat-card.green  .pct { color: #15803d; }
-  .stat-card.red    .pct { color: #be123c; }
-  .stat-card.yellow .pct { color: #a16207; }
-  .stat-card .record { font-family: 'DM Mono', monospace; font-size: .8rem; color: #64748b; }
+  .stat-card.green  { background: rgba(21,128,61,.12);  border: 1px solid rgba(21,128,61,.3); }
+  .stat-card.red    { background: rgba(190,18,60,.12);  border: 1px solid rgba(190,18,60,.3); }
+  .stat-card.yellow { background: rgba(161,98,7,.12);   border: 1px solid rgba(161,98,7,.3); }
+  .stat-card .label { font-size: .75rem; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--text3); margin-bottom: .5rem; }
+  .stat-card .pct   { font-size: 2.5rem; font-weight: 700; line-height: 1; margin-bottom: .25rem; }
+  .stat-card.green  .pct { color: #4ade80; }
+  .stat-card.red    .pct { color: #fb7185; }
+  .stat-card.yellow .pct { color: #fbbf24; }
+  .stat-card .record { font-family: 'DM Mono', monospace; font-size: .8rem; color: var(--text3); }
   .stat-card .vs-be  { font-size: .75rem; font-weight: 600; margin-top: .4rem; padding: 2px 8px; border-radius: 20px; display: inline-block; }
-  .stat-card.green  .vs-be { background: #dcfce7; color: #15803d; }
-  .stat-card.red    .vs-be { background: #ffe4e6; color: #be123c; }
-  .stat-card.yellow .vs-be { background: #fef9c3; color: #a16207; }
+  .stat-card.green  .vs-be { background: rgba(74,222,128,.15); color: #4ade80; }
+  .stat-card.red    .vs-be { background: rgba(251,113,133,.15); color: #fb7185; }
+  .stat-card.yellow .vs-be { background: rgba(251,191,36,.15); color: #fbbf24; }
 
   .section-title {
-    font-family: 'Syne', sans-serif; font-size: 1rem; font-weight: 600;
-    color: #1e293b; margin: 2rem 0 1rem;
-    display: flex; align-items: center; gap: .5rem;
+    font-size: 1rem; font-weight: 600; color: var(--text1);
+    margin: 2rem 0 1rem; display: flex; align-items: center; gap: .5rem;
   }
-  .section-title::after { content: ''; flex: 1; height: 1px; background: #e2e8f0; }
+  .section-title::after { content: ''; flex: 1; height: 1px; background: var(--border); }
 
-  .chart-box { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 1.25rem; margin-bottom: 1.5rem; }
+  .chart-box { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 1.25rem; margin-bottom: 1.5rem; }
 
   /* Type breakdown table */
   .type-table { width: 100%; border-collapse: collapse; font-size: .875rem; }
-  .type-table th { text-align: left; font-size: .72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: #94a3b8; padding: .5rem .75rem; border-bottom: 1px solid #f1f5f9; }
+  .type-table th { text-align: left; font-size: .72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--text3); padding: .5rem .75rem; border-bottom: 1px solid var(--border); }
   .type-table th.r { text-align: right; }
-  .type-table td { padding: .6rem .75rem; border-bottom: 1px solid #f8fafc; color: #334155; }
-  .type-table td.r { text-align: right; font-family: 'DM Mono', monospace; font-size: .8rem; }
+  .type-table td { padding: .6rem .75rem; border-bottom: 1px solid var(--border); color: var(--text1); }
+  .type-table td.r { text-align: right; font-family: 'DM Mono', monospace; font-size: .8rem; color: var(--text2); }
   .type-table tr:last-child td { border-bottom: none; }
-  .type-table tr:hover td { background: #f8fafc; }
+  .type-table tr:hover td { background: var(--bg2); }
   .pct-bar-wrap { display: flex; align-items: center; gap: .5rem; }
   .pct-bar { height: 6px; border-radius: 3px; flex-shrink: 0; }
   .pct-val { font-family: 'DM Mono', monospace; font-size: .8rem; font-weight: 500; white-space: nowrap; }
 
   /* Recent props table */
   .recent-table { width: 100%; border-collapse: collapse; font-size: .8rem; }
-  .recent-table th { text-align: left; font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: #94a3b8; padding: .5rem .6rem; border-bottom: 2px solid #f1f5f9; position: sticky; top: 0; background: #fff; }
+  .recent-table th { text-align: left; font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--text3); padding: .5rem .6rem; border-bottom: 2px solid var(--border); position: sticky; top: 0; background: var(--card); }
   .recent-table th.r { text-align: right; }
-  .recent-table td { padding: .55rem .6rem; border-bottom: 1px solid #f8fafc; color: #334155; }
-  .recent-table td.r { text-align: right; font-family: 'DM Mono', monospace; }
+  .recent-table td { padding: .55rem .6rem; border-bottom: 1px solid var(--border); color: var(--text1); }
+  .recent-table td.r { text-align: right; font-family: 'DM Mono', monospace; color: var(--text2); }
   .recent-table tr:last-child td { border-bottom: none; }
-  .recent-table tr:hover td { background: #f8fafc; }
+  .recent-table tr:hover td { background: var(--bg2); }
   .table-scroll { max-height: 520px; overflow-y: auto; border-radius: 0 0 14px 14px; }
 
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: .7rem; font-weight: 700; letter-spacing: .04em; }
-  .badge.win   { background: #dcfce7; color: #15803d; }
-  .badge.loss  { background: #ffe4e6; color: #be123c; }
-  .badge.push  { background: #f1f5f9; color: #64748b; }
-  .badge.over  { background: #eff6ff; color: #1d4ed8; }
-  .badge.under { background: #fdf4ff; color: #7e22ce; }
+  .ps-badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: .7rem; font-weight: 700; letter-spacing: .04em; }
+  .ps-badge.win   { background: rgba(74,222,128,.15);  color: #4ade80; }
+  .ps-badge.loss  { background: rgba(251,113,133,.15); color: #fb7185; }
+  .ps-badge.push  { background: var(--bg2); color: var(--text3); }
+  .ps-badge.over  { background: rgba(96,165,250,.15);  color: #60a5fa; }
+  .ps-badge.under { background: rgba(192,132,252,.15); color: #c084fc; }
 
-  .no-data { text-align: center; padding: 3rem 1rem; color: #94a3b8; }
+  .no-data { text-align: center; padding: 3rem 1rem; color: var(--text3); }
   .no-data .icon { font-size: 2.5rem; margin-bottom: .75rem; }
   .no-data p { font-size: .9rem; }
-  .no-data code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-size: .8rem; }
+  .no-data code { background: var(--bg2); padding: 2px 6px; border-radius: 4px; font-size: .8rem; }
 
   @media (max-width: 640px) {
     .card-grid { grid-template-columns: 1fr 1fr; }
     .card-grid .stat-card:last-child { grid-column: 1 / -1; }
-    .filter-bar { gap: .35rem; }
   }
 </style>
 
-<div class="ps-wrap">
-  <div class="ps-header">
-    <h1>Player Prop Results</h1>
-    <p>Graded picks vs actual MLB boxscore stats · Break-even = 52.4%</p>
-  </div>
+<header>
+  <h1>Player Prop Results</h1>
+  <p>Graded picks vs actual MLB boxscore stats · Break-even = 52.4%</p>
+</header>
 
-  <div id="filter-bar-wrap"></div>
-  <div id="ps-content">
-    <div class="no-data"><div class="icon">⏳</div><p>Loading…</p></div>
-  </div>
+<div id="filter-bar-wrap"></div>
+<div id="ps-content">
+  <div class="no-data"><div class="icon">⏳</div><p>Loading…</p></div>
 </div>
 
 <script>
@@ -191,30 +175,33 @@ function renderFilterBar(totalAll) {
 
   document.getElementById('filter-bar-wrap').innerHTML = `
   <div class="filter-bar">
-    <span class="filter-label">Range</span>
-    <div class="filter-group">
-      ${['all','7','14','30'].map(v => `<button class="fb ${filters.days===v?'active':''}" onclick="setFilter('days','${v}')">${v==='all'?'All':'Last '+v+'d'}</button>`).join('')}
+    <div class="filter-row">
+      <span class="flabel">Range</span>
+      <div class="fgroup">
+        ${['all','7','14','30'].map(v => `<button class="fb ${filters.days===v?'active':''}" onclick="setFilter('days','${v}')">${v==='all'?'All':'Last '+v+'d'}</button>`).join('')}
+      </div>
+      <div class="fdivider"></div>
+      <span class="flabel">Team</span>
+      <select class="fselect" onchange="setFilter('team',this.value)">${teamOpts}</select>
+      <div class="fdivider"></div>
+      <span class="flabel">Pick</span>
+      <div class="fgroup">
+        ${['all','OVER','UNDER'].map(v => `<button class="fb ${filters.pick===v?'active':''}" onclick="setFilter('pick','${v}')">${v==='all'?'All':v}</button>`).join('')}
+      </div>
+      <div class="fdivider"></div>
+      <span class="flabel">Result</span>
+      <div class="fgroup">
+        ${['all','WIN','LOSS'].map(v => `<button class="fb ${filters.result===v?'active':''}" onclick="setFilter('result','${v}')">${v==='all'?'All':v}</button>`).join('')}
+      </div>
+      <span class="filter-count" style="margin-left:auto"><strong>${filtered}</strong> of ${totalAll} props</span>
     </div>
-    <div class="filter-divider"></div>
-    <span class="filter-label">Prop</span>
-    <div class="filter-group">
-      <button class="fb ${filters.prop_type==='all'?'active':''}" onclick="setFilter('prop_type','all')">All</button>
-      ${PROP_TYPES.map(k => `<button class="fb ${filters.prop_type===k?'active':''}" onclick="setFilter('prop_type','${k}')">${PROP_LABELS[k]||k}</button>`).join('')}
+    <div class="filter-row">
+      <span class="flabel">Prop</span>
+      <div class="fgroup">
+        <button class="fb ${filters.prop_type==='all'?'active':''}" onclick="setFilter('prop_type','all')">All</button>
+        ${PROP_TYPES.map(k => `<button class="fb ${filters.prop_type===k?'active':''}" onclick="setFilter('prop_type','${k}')">${PROP_LABELS[k]||k}</button>`).join('')}
+      </div>
     </div>
-    <div class="filter-divider"></div>
-    <span class="filter-label">Team</span>
-    <select class="filter-select" onchange="setFilter('team',this.value)">${teamOpts}</select>
-    <div class="filter-divider"></div>
-    <span class="filter-label">Pick</span>
-    <div class="filter-group">
-      ${['all','OVER','UNDER'].map(v => `<button class="fb ${filters.pick===v?'active':''}" onclick="setFilter('pick','${v}')">${v==='all'?'All':v}</button>`).join('')}
-    </div>
-    <div class="filter-divider"></div>
-    <span class="filter-label">Result</span>
-    <div class="filter-group">
-      ${['all','WIN','LOSS'].map(v => `<button class="fb ${filters.result===v?'active':''}" onclick="setFilter('result','${v}')">${v==='all'?'All':v}</button>`).join('')}
-    </div>
-    <span class="filter-count"><strong>${filtered}</strong> of ${totalAll} props</span>
   </div>`;
 }
 
@@ -277,9 +264,9 @@ function renderRecentTable(rows) {
       <td class="r">${r.line ?? '—'}</td>
       <td class="r">${r.projection != null ? r.projection.toFixed(2) : '—'}</td>
       <td class="r" style="color:${edge_color};font-weight:600">${edge_sign}${r.edge != null ? (r.edge*100).toFixed(1) : '—'}%</td>
-      <td><span class="badge ${pick_cls}">${r.pick}</span></td>
+      <td><span class="ps-badge ${pick_cls}">${r.pick}</span></td>
       <td class="r">${r.actual_value ?? '—'}</td>
-      <td><span class="badge ${res_cls}">${r.result}</span></td>
+      <td><span class="ps-badge ${res_cls}">${r.result}</span></td>
     </tr>`;
   }).join('');
   return `<div class="table-scroll"><table class="recent-table">
