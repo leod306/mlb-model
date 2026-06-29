@@ -644,7 +644,7 @@ def api_prop_stats():
         FROM player_props
         WHERE result IN ('WIN','LOSS','PUSH')
         ORDER BY prop_date DESC, ABS(edge) DESC
-        LIMIT 100
+        LIMIT 2000
     """)
 
     with engine.begin() as conn:
