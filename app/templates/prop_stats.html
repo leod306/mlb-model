@@ -142,7 +142,7 @@ function cardColor(pct) {
 }
 
 function renderCards(d) {
-  const overall = d.overall;
+  const overall = d.summary;
   const wr = overall.win_pct;
   const overs = d.by_pick.OVER  || {};
   const unders = d.by_pick.UNDER || {};
