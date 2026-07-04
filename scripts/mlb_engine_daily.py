@@ -45,11 +45,44 @@ OU_WINDOW          = 20
 ATS_WINDOW         = 20
 DEFAULT_TOTAL_LINE = float(os.getenv("DEFAULT_TOTAL_LINE", "8.5"))
 
-# Calibration offset — set via env; new retrain.py model should need less correction
-TOTAL_CALIBRATION  = float(os.getenv("TOTAL_CALIBRATION", "-1.2"))
+# -----------------------------------------------------------------------------
+# BETTING LAYER CONFIG
+#
+# The old approach used the ensemble's seed-to-seed spread as a "confidence
+# interval" and hand-tuned fudge constants (TOTAL_CALIBRATION=-1.2). Both are
+# gone. Uncertainty now comes from the model bundle's out-of-fold residual
+# sigmas, bias correction comes from the measured total_bias, and every pick
+# is an edge-vs-price decision.
+# -----------------------------------------------------------------------------
 
-# Home bias correction — set to 0: isotonic calibration in new model handles this
+# Legacy env overrides — default 0.0 now. The retrained bundle carries a
+# measured total_bias which is applied automatically. Only set these env vars
+# if you're running an OLD model bundle that lacks sigma/bias fields.
+TOTAL_CALIBRATION    = float(os.getenv("TOTAL_CALIBRATION",    "0.0"))
 HOME_BIAS_CORRECTION = float(os.getenv("HOME_BIAS_CORRECTION", "0.0"))
+
+# Fallback uncertainty if the bundle predates sigma fields.
+# ~4.0 runs is the empirical std dev of an MLB game total; ~3.9 for margin.
+FALLBACK_SIGMA_TOTAL = float(os.getenv("FALLBACK_SIGMA_TOTAL", "4.0"))
+FALLBACK_SIGMA_RD    = float(os.getenv("FALLBACK_SIGMA_RD",    "3.9"))
+
+# Assumed juice on totals when the odds feed has the line but not the price.
+OU_ASSUMED_PRICE = int(os.getenv("OU_ASSUMED_PRICE", "-110"))   # breakeven .5238
+
+# Minimum edges before anything becomes a pick. These are probability-point
+# edges over the de-vigged market / breakeven price. 2.5-4% is a sane band:
+# lower and you're betting noise, higher and you'll almost never bet.
+MIN_ML_EDGE = float(os.getenv("MIN_ML_EDGE", "0.03"))    # model prob vs novig market prob
+MIN_OU_EDGE = float(os.getenv("MIN_OU_EDGE", "0.03"))    # P(side) vs breakeven at OU_ASSUMED_PRICE
+
+# Run line thresholds. We do NOT have run line prices in market_odds, so these
+# picks are advisory only and never ranked in top plays. Typical prices:
+#   favorite -1.5 pays ~+120..+140  (breakeven ~.42-.45)
+#   underdog +1.5 costs ~-180..-250 (breakeven ~.64-.71)
+# Thresholds below are conservative vs those typical prices.
+# TODO: add RL prices to the odds loader — then these become edge-vs-price too.
+RL_FAV_MIN_COVER_PROB = float(os.getenv("RL_FAV_MIN_COVER_PROB", "0.50"))
+RL_DOG_MIN_COVER_PROB = float(os.getenv("RL_DOG_MIN_COVER_PROB", "0.74"))
 
 # Elo constants (must match retrain.py)
 ELO_START    = 1500.0
@@ -133,6 +166,70 @@ def normalize_date_col(df: pd.DataFrame, col: str) -> pd.DataFrame:
     if col in df.columns:
         df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
     return df
+
+
+# =============================================================================
+# BETTING MATH
+# All picks are edge-vs-price decisions built on these four functions.
+# =============================================================================
+
+def american_to_prob(ml: Any) -> Optional[float]:
+    """American odds → implied probability (includes vig)."""
+    m = coerce_float(ml)
+    if m is None or m == 0:
+        return None
+    if m < 0:
+        return -m / (-m + 100.0)
+    return 100.0 / (m + 100.0)
+
+
+def american_payout(ml: Any) -> Optional[float]:
+    """Profit per $1 staked at American odds ml (excluding stake)."""
+    m = coerce_float(ml)
+    if m is None or m == 0:
+        return None
+    return (100.0 / -m) if m < 0 else (m / 100.0)
+
+
+def devig_two_way(p_a: Optional[float], p_b: Optional[float]) -> Optional[float]:
+    """Remove vig from a two-way market. Returns fair probability of side A."""
+    if p_a is None or p_b is None:
+        return None
+    denom = p_a + p_b
+    if denom <= 0:
+        return None
+    return p_a / denom
+
+
+def ev_per_dollar(p: float, ml: Any) -> Optional[float]:
+    """Expected profit per $1 staked given win probability p and price ml."""
+    payout = american_payout(ml)
+    if payout is None:
+        return None
+    return p * payout - (1.0 - p)
+
+
+def normal_cdf(x: float, mu: float = 0.0, sigma: float = 1.0) -> float:
+    """Standard-library normal CDF — avoids a scipy dependency."""
+    if sigma <= 0:
+        return 0.5
+    return 0.5 * (1.0 + math.erf((x - mu) / (sigma * math.sqrt(2.0))))
+
+
+def prob_over(pred_total: float, line: float, sigma: float) -> float:
+    """
+    P(actual total > line) treating the outcome as Normal(pred_total, sigma).
+    sigma must be the OUT-OF-FOLD residual sigma from retrain.py — the true
+    predictive uncertainty — never the ensemble's seed-to-seed spread.
+    MLB totals can't push on .5 lines, so > vs >= doesn't matter there;
+    on whole-number lines pushes exist but the normal approx absorbs it.
+    """
+    return 1.0 - normal_cdf(line, mu=pred_total, sigma=sigma)
+
+
+def prob_home_covers(rd_pred: float, spread: float, sigma_rd: float) -> float:
+    """P(home margin > spread) with margin ~ Normal(rd_pred, sigma_rd)."""
+    return 1.0 - normal_cdf(spread, mu=rd_pred, sigma=sigma_rd)
 
 
 # =============================================================================
@@ -223,6 +320,15 @@ def ensure_predictions_table() -> None:
         "best_home_ml":           "INT",
         "best_away_ml":           "INT",
         "model_edge":             "DOUBLE PRECISION",
+        # --- new betting-layer columns (needed for CLV + pick auditing) ---
+        "market_home_prob_novig": "DOUBLE PRECISION",
+        "home_win_prob_raw":      "DOUBLE PRECISION",  # pre-calibration ensemble prob
+        "ml_edge":                "DOUBLE PRECISION",  # calibrated prob - novig market prob
+        "p_over":                 "DOUBLE PRECISION",  # P(total > line) via sigma_total
+        "ou_edge":                "DOUBLE PRECISION",  # P(picked side) - breakeven
+        "rl_home_cover_prob":     "DOUBLE PRECISION",  # P(home margin > 1.5)
+        "sigma_total_used":       "DOUBLE PRECISION",
+        "sigma_rd_used":          "DOUBLE PRECISION",
     }
     existing = set(get_table_columns(PREDICTIONS_TABLE))
     with engine.begin() as conn:
@@ -539,6 +645,36 @@ def get_team_last5_run_diff(team_games: pd.DataFrame, team: str, target_date, cu
     return float(tg["run_diff"].mean())
 
 
+def get_team_last_n_stats(team_games: pd.DataFrame, team: str, target_date,
+                          n: int = 10, current_season: int = 2026,
+                          min_games: int = 5) -> Optional[Dict[str, float]]:
+    """
+    TRUE rolling last-n stats (same season, before target_date).
+
+    This is what the training data's home_last10_* columns represent. The old
+    engine fed the model get_team_blended_form() output instead — a mix of
+    current form and 2024/2025 season baselines. If prior seasons ran hotter,
+    that inflated offensive inputs at serve time relative to training and
+    biased every total upward (the reason TOTAL_CALIBRATION=-1.2 existed).
+
+    Returns None when fewer than min_games are available; caller falls back
+    to blended baselines (early season only, when there's no better option).
+    """
+    tg = team_games[
+        (team_games["team"] == team) &
+        (team_games["season"] == current_season) &
+        (team_games["official_date"] < target_date)
+    ].sort_values("official_date").tail(n)
+    if len(tg) < min_games:
+        return None
+    return {
+        "runs_scored":  float(tg["runs_scored"].mean()),
+        "runs_allowed": float(tg["runs_allowed"].mean()),
+        "run_diff":     float(tg["run_diff"].mean()),
+        "games":        float(len(tg)),
+    }
+
+
 def build_prior_baselines(team_games: pd.DataFrame) -> Dict[str, Dict[str, float]]:
     """Tapered weights: 2026=60%, 2025=30%, 2024=10%"""
     if team_games.empty:
@@ -797,13 +933,22 @@ def load_model_bundle() -> Dict[str, Any]:
         "total_models": obj["total_runs_models"],
         "feature_cols": obj.get("feature_cols"),
         "n_models":     obj.get("n_models"),
-        "calibrator":   obj.get("calibrator"),   # isotonic calibration (new model)
+        "calibrator":   obj.get("calibrator"),
         "park_factors": obj.get("park_factors", PARK_FACTORS),
+        # Out-of-fold residual stats — the REAL uncertainty of predictions.
+        "sigma_total":  coerce_float(obj.get("sigma_total"), FALLBACK_SIGMA_TOTAL) or FALLBACK_SIGMA_TOTAL,
+        "sigma_rd":     coerce_float(obj.get("sigma_rd"),    FALLBACK_SIGMA_RD)    or FALLBACK_SIGMA_RD,
+        "total_bias":   coerce_float(obj.get("total_bias"),  None),
+        "market_fills": obj.get("market_fills", {"market_home_prob_novig": 0.5,
+                                                 "market_total_line": DEFAULT_TOTAL_LINE}),
     }
 
 
 def predict_ml_ensemble(models, X):
     preds = np.column_stack([m.predict_proba(X)[:, 1] for m in models])
+    # NOTE: the percentile spread here is seed-to-seed model disagreement.
+    # It is kept only for logging/monitoring — it is NOT outcome uncertainty
+    # and is never used in pick logic.
     return preds.mean(axis=1), np.percentile(preds,25,axis=1), np.percentile(preds,75,axis=1), preds.std(axis=1)
 
 
@@ -848,7 +993,7 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         merged = merged.merge(odds_df, on="game_pk", how="left")
         log(f"  market_odds joined: {len(odds_df)} rows")
     else:
-        log("  ⚠️  market_odds not available — using model prob + default line")
+        log("  ⚠️  market_odds not available — ML picks will be PASS (no price = no bet)")
 
     lineups_df = load_lineups_for_games(merged["game_pk"].tolist())
     sp_ids = []
@@ -877,6 +1022,24 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         home_form = get_team_blended_form(team_games, baselines, home_team, target_date, "home", MLB_SEASON, BLEND_CUTOFF_GAMES, ROLLING_WINDOW)
         away_form = get_team_blended_form(team_games, baselines, away_team, target_date, "away", MLB_SEASON, BLEND_CUTOFF_GAMES, ROLLING_WINDOW)
 
+        # ---------------------------------------------------------------------
+        # TRUE last-10 rolling stats to match training data (fixes train/serve
+        # skew that inflated totals). Blended baselines only as an early-season
+        # fallback when a team has < 5 games in the current season.
+        # ---------------------------------------------------------------------
+        home_l10 = get_team_last_n_stats(team_games, home_team, target_date, ROLLING_WINDOW, MLB_SEASON)
+        away_l10 = get_team_last_n_stats(team_games, away_team, target_date, ROLLING_WINDOW, MLB_SEASON)
+
+        if home_l10 is not None:
+            home_rs, home_ra, home_rd = home_l10["runs_scored"], home_l10["runs_allowed"], home_l10["run_diff"]
+        else:
+            home_rs, home_ra, home_rd = float(home_form["runs_scored"]), float(home_form["runs_allowed"]), float(home_form["run_diff"])
+
+        if away_l10 is not None:
+            away_rs, away_ra, away_rd = away_l10["runs_scored"], away_l10["runs_allowed"], away_l10["run_diff"]
+        else:
+            away_rs, away_ra, away_rd = float(away_form["runs_scored"]), float(away_form["runs_allowed"]), float(away_form["run_diff"])
+
         home_live = get_sp_current_stats(pgl_df, home_sp_name, target_date)
         away_live = get_sp_current_stats(pgl_df, away_sp_name, target_date)
 
@@ -895,12 +1058,6 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         away_bp_ip   = float(get_bullpen_ip_4d(pgl_df, away_team, target_date))
         home_win_pct = float(home_form["side_win_pct"])
         away_win_pct = float(away_form["side_win_pct"])
-        home_rs      = float(home_form["runs_scored"])
-        away_rs      = float(away_form["runs_scored"])
-        home_ra      = float(home_form["runs_allowed"])
-        away_ra      = float(away_form["runs_allowed"])
-        home_rd      = float(home_form["run_diff"])
-        away_rd      = float(away_form["run_diff"])
 
         home_wrc    = coerce_float(row.get("home_wrc_plus"),    100.0) or 100.0
         away_wrc    = coerce_float(row.get("away_wrc_plus"),    100.0) or 100.0
@@ -917,6 +1074,11 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         mkt_away_prob = coerce_float(row.get("market_away_prob"))
         mkt_total     = coerce_float(row.get("market_total_line"))
 
+        # De-vigged market probability — the market's fair opinion.
+        hp = mkt_home_prob if mkt_home_prob is not None else american_to_prob(mkt_home_ml)
+        ap = mkt_away_prob if mkt_away_prob is not None else american_to_prob(mkt_away_ml)
+        mkt_home_novig = devig_two_way(hp, ap)
+
         home_ou_rate    = get_ou_over_rate(team_games, home_team, target_date)
         away_ou_rate    = get_ou_over_rate(team_games, away_team, target_date)
         home_last_total = get_last_game_total(team_games, home_team, target_date)
@@ -928,7 +1090,6 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         home_lq = compute_lineup_quality(game_pk, "home", away_sp_id, lineups_df, bvp_df)
         away_lq = compute_lineup_quality(game_pk, "away", home_sp_id, lineups_df, bvp_df)
 
-        # --- New features for retrained model ---
         home_elo = elo_ratings.get(home_team, ELO_START)
         away_elo = elo_ratings.get(away_team, ELO_START)
 
@@ -936,6 +1097,7 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
 
         home_last5_rd = get_team_last5_run_diff(team_games, home_team, target_date, MLB_SEASON)
         away_last5_rd = get_team_last5_run_diff(team_games, away_team, target_date, MLB_SEASON)
+        # form trend = last5 - TRUE last10 (matches retrain.py exactly now)
         home_form_trend = home_last5_rd - home_rd
         away_form_trend = away_last5_rd - away_rd
 
@@ -990,7 +1152,6 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
             "lineup_ops_diff":          home_lq["ops_vs_sp"] - away_lq["ops_vs_sp"],
             "home_lineup_hard_hit":     home_lq["hard_hit_pct"],
             "away_lineup_hard_hit":     away_lq["hard_hit_pct"],
-            # New features (retrained model)
             "elo_diff":                 home_elo - away_elo,
             "home_elo_pre":             home_elo,
             "away_elo_pre":             away_elo,
@@ -1010,6 +1171,7 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
             "market_away_ml":           mkt_away_ml,
             "market_home_prob":         mkt_home_prob,
             "market_away_prob":         mkt_away_prob,
+            "market_home_prob_novig":   mkt_home_novig,
             "market_total_line":        mkt_total,
         })
 
@@ -1023,7 +1185,7 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
         "home_ou_over_rate","away_ou_over_rate",
         "home_ats_cover_rate","away_ats_cover_rate",
         "home_lineup_ops_vs_sp","away_lineup_ops_vs_sp","lineup_ops_diff",
-        "market_home_ml","market_away_ml","market_total_line",
+        "market_home_ml","market_away_ml","market_total_line","market_home_prob_novig",
     ]
     if not features_df.empty:
         log(features_df[[c for c in preview_cols if c in features_df.columns]].nunique(dropna=False).to_string())
@@ -1033,102 +1195,156 @@ def build_features_for_games(games_df: pd.DataFrame) -> pd.DataFrame:
 
 # =============================================================================
 # PICKS / TOP PLAYS
+# Every pick is an edge-vs-price decision:
+#   ML  — calibrated model prob vs de-vigged market prob (no price → PASS)
+#   O/U — P(over) from Normal(pred, sigma_total) vs breakeven at assumed -110
+#   RL  — P(cover) from Normal(rd_pred, sigma_rd) vs conservative thresholds
+#         (advisory only until RL prices are in market_odds)
 # =============================================================================
 
-def build_pick_columns(df: pd.DataFrame) -> pd.DataFrame:
+def build_pick_columns(df: pd.DataFrame, sigma_total: float, sigma_rd: float) -> pd.DataFrame:
     df = df.copy()
 
+    ou_breakeven = american_to_prob(OU_ASSUMED_PRICE) or 0.5238
+
     def get_ml(r):
-        lo   = coerce_float(r.get("home_win_prob_lo"))
-        hi   = coerce_float(r.get("home_win_prob_hi"))
-        if lo is None or hi is None:
-            return "PASS"
-
-        lo_adj = lo - HOME_BIAS_CORRECTION
-        hi_adj = hi - HOME_BIAS_CORRECTION
-
-        if lo_adj > 0.48:  return r["home_team"]
-        if hi_adj < 0.52:  return r["away_team"]
-        return "PASS"
-
-    def get_rl(r, ml):
-        rd             = coerce_float(r.get("run_diff_pred"))
-        home_prob      = coerce_float(r.get("home_win_prob"))
-        market_home_ml = coerce_float(r.get("market_home_ml"))
-        market_away_ml = coerce_float(r.get("market_away_ml"))
-        home           = r["home_team"]
-        away           = r["away_team"]
-        if rd is None: return "PASS"
-
-        if market_home_ml is not None and market_away_ml is not None:
-            vegas_underdog = away if market_away_ml > 0 else home
-            vegas_favorite = home if market_away_ml > 0 else away
-        elif home_prob is not None:
-            vegas_underdog = away if home_prob >= 0.5 else home
-            vegas_favorite = home if home_prob >= 0.5 else away
-        else:
-            return "PASS"
-
-        if ml and ml not in ("PASS", "") and ml == vegas_underdog:
-            return f"{vegas_underdog} +1.5"
-
-        if home_prob is not None:
-            underdog_prob = (1 - home_prob) if vegas_underdog == away else home_prob
-            if underdog_prob >= 0.40:
-                return f"{vegas_underdog} +1.5"
-
-        if ml and ml not in ("PASS", "") and ml == vegas_favorite and rd > 1.5:
-            return f"{vegas_favorite} -1.5"
-
-        return "PASS"
+        rd_pred = coerce_float(r.get("run_diff_pred"))
+        m_home  = coerce_float(r.get("market_home_prob_novig")) # de-vigged market
+        if rd_pred is None or m_home is None:
+            return "PASS", None   # no price = no bet
+        # P(home wins) = P(run_diff > 0) under Normal(rd_pred, sigma_rd)
+        # This ensures ML and RL picks always agree on direction.
+        p_home = prob_over(rd_pred, 0.0, sigma_rd)
+        edge = p_home - m_home
+        if edge >= MIN_ML_EDGE:
+            return r["home_team"], edge
+        if edge <= -MIN_ML_EDGE:
+            return r["away_team"], edge
+        return "PASS", edge
 
     def get_ou(r):
-        mean = coerce_float(r.get("total_runs_pred"))
-        lo   = coerce_float(r.get("total_runs_lo"))
-        hi   = coerce_float(r.get("total_runs_hi"))
-        if mean is None or lo is None or hi is None:
-            return None
-        line = coerce_float(r.get("market_total_line")) or DEFAULT_TOTAL_LINE
-        if lo > line:         return "OVER"
-        if hi < line:         return "UNDER"
-        if mean > line + 0.5: return "OVER"
-        if mean < line - 0.5: return "UNDER"
-        return "PASS"
+        pred = coerce_float(r.get("total_runs_pred"))
+        line = coerce_float(r.get("market_total_line"))
+        if pred is None or line is None:
+            # No market total for this game — nothing to bet against.
+            return "PASS", None, None
+        p_ov = prob_over(pred, line, sigma_total)
+        if p_ov >= ou_breakeven + MIN_OU_EDGE:
+            return "OVER",  p_ov, p_ov - ou_breakeven
+        if (1.0 - p_ov) >= ou_breakeven + MIN_OU_EDGE:
+            return "UNDER", p_ov, (1.0 - p_ov) - ou_breakeven
+        return "PASS", p_ov, None
 
-    df["ml_pick"]      = df.apply(get_ml, axis=1)
-    df["runline_pick"] = df.apply(lambda r: get_rl(r, r["ml_pick"]), axis=1)
-    df["ou_pick"]      = df.apply(get_ou, axis=1)
+    def get_rl(r):
+        rd_pred = coerce_float(r.get("run_diff_pred"))
+        m_home  = coerce_float(r.get("market_home_prob_novig"))
+        home    = r["home_team"]
+        away    = r["away_team"]
+        if rd_pred is None:
+            return "PASS", None
+
+        # market favorite by de-vigged prob; fall back to model if odds missing
+        if m_home is not None:
+            fav_is_home = m_home >= 0.5
+        else:
+            p_home = coerce_float(r.get("home_win_prob"))
+            if p_home is None:
+                return "PASS", None
+            fav_is_home = p_home >= 0.5
+
+        p_home_covers_15 = prob_home_covers(rd_pred, 1.5, sigma_rd)   # home wins by 2+
+        p_away_covers_15 = 1.0 - normal_cdf(-1.5, mu=-rd_pred, sigma=sigma_rd)  # away wins by 2+
+
+        if fav_is_home:
+            fav, dog = home, away
+            p_fav_cover = p_home_covers_15                 # fav -1.5
+            p_dog_cover = 1.0 - p_home_covers_15           # dog +1.5 (home fails to win by 2+)
+        else:
+            fav, dog = away, home
+            p_fav_cover = p_away_covers_15
+            p_dog_cover = 1.0 - p_away_covers_15
+
+        if p_fav_cover >= RL_FAV_MIN_COVER_PROB:
+            return f"{fav} -1.5", p_home_covers_15
+        if p_dog_cover >= RL_DOG_MIN_COVER_PROB:
+            return f"{dog} +1.5", p_home_covers_15
+        return "PASS", p_home_covers_15
+
+    ml_results = df.apply(get_ml, axis=1)
+    df["ml_pick"] = [x[0] for x in ml_results]
+    df["ml_edge"] = [x[1] for x in ml_results]
+
+    ou_results = df.apply(get_ou, axis=1)
+    df["ou_pick"] = [x[0] for x in ou_results]
+    df["p_over"]  = [x[1] for x in ou_results]
+    df["ou_edge"] = [x[2] for x in ou_results]
+
+    rl_results = df.apply(get_rl, axis=1)
+    df["runline_pick"]       = [x[0] for x in rl_results]
+    df["rl_home_cover_prob"] = [x[1] for x in rl_results]
+
+    # legacy column some dashboards read
+    df["model_edge"] = df["ml_edge"]
     return df
 
 
-def build_top_plays(df, total_line=DEFAULT_TOTAL_LINE):
+def build_top_plays(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Rank plays by expected value per $1 staked at the actual (or assumed)
+    price. ML plays require real market prices — no price, no play.
+    Run line plays are excluded until RL prices are in the odds feed.
+    """
     rows = []
     for _, r in df.iterrows():
         away, home = r["away_team"], r["home_team"]
-        lo   = coerce_float(r.get("home_win_prob_lo"))
-        hi   = coerce_float(r.get("home_win_prob_hi"))
-        mean = coerce_float(r.get("home_win_prob"))
 
-        lo_adj = (lo - HOME_BIAS_CORRECTION) if lo is not None else None
-        hi_adj = (hi - HOME_BIAS_CORRECTION) if hi is not None else None
+        # --- Moneyline: EV at the actual market price
+        ml_pick = r.get("ml_pick")
+        p_home  = coerce_float(r.get("home_win_prob"))
+        if ml_pick not in (None, "PASS", "") and p_home is not None:
+            if ml_pick == home:
+                p, price = p_home, coerce_float(r.get("market_home_ml"))
+            else:
+                p, price = 1.0 - p_home, coerce_float(r.get("market_away_ml"))
+            if price is not None:
+                ev = ev_per_dollar(p, price)
+                if ev is not None and ev > 0:
+                    edge = coerce_float(r.get("ml_edge"))
+                    rows.append({
+                        "game_pk":     r["game_pk"],
+                        "bet_type":    "ML",
+                        "pick":        ml_pick,
+                        "matchup":     f"{away} @ {home}",
+                        "score":       round(ev, 4),
+                        "model_value": round(p, 3),
+                        "extra":       f"p={p:.3f} vs mkt novig={coerce_float(r.get('market_home_prob_novig'), 0.5):.3f}"
+                                       f" | edge {edge:+.3f} | price {int(price)}",
+                    })
 
-        if lo_adj and lo_adj > 0.5:
-            rows.append({"game_pk":r["game_pk"],"bet_type":"ML","pick":home,"matchup":f"{away} @ {home}","score":lo_adj-0.5,"model_value":mean,"extra":f"CI: {lo:.3f} to {hi:.3f}"})
-        elif hi_adj and hi_adj < 0.5:
-            rows.append({"game_pk":r["game_pk"],"bet_type":"ML","pick":away,"matchup":f"{away} @ {home}","score":0.5-hi_adj,"model_value":1-mean if mean else None,"extra":f"Home CI: {lo:.3f} to {hi:.3f}"})
-
-        tlo       = coerce_float(r.get("total_runs_lo"))
-        thi       = coerce_float(r.get("total_runs_hi"))
-        tmean     = coerce_float(r.get("total_runs_pred"))
-        game_line = coerce_float(r.get("market_total_line")) or total_line
-
-        if tlo and tlo > game_line:
-            rows.append({"game_pk":r["game_pk"],"bet_type":"O/U","pick":"OVER","matchup":f"{away} @ {home}","score":tlo-game_line,"model_value":tmean,"extra":f"CI: {tlo:.2f} to {thi:.2f} | line {game_line}"})
-        elif thi and thi < game_line:
-            rows.append({"game_pk":r["game_pk"],"bet_type":"O/U","pick":"UNDER","matchup":f"{away} @ {home}","score":game_line-thi,"model_value":tmean,"extra":f"CI: {tlo:.2f} to {thi:.2f} | line {game_line}"})
+        # --- Totals: EV at assumed juice (line from market, price assumed)
+        ou_pick = r.get("ou_pick")
+        p_ov    = coerce_float(r.get("p_over"))
+        line    = coerce_float(r.get("market_total_line"))
+        pred    = coerce_float(r.get("total_runs_pred"))
+        if ou_pick in ("OVER", "UNDER") and p_ov is not None and line is not None:
+            p  = p_ov if ou_pick == "OVER" else 1.0 - p_ov
+            ev = ev_per_dollar(p, OU_ASSUMED_PRICE)
+            if ev is not None and ev > 0:
+                rows.append({
+                    "game_pk":     r["game_pk"],
+                    "bet_type":    "O/U",
+                    "pick":        ou_pick,
+                    "matchup":     f"{away} @ {home}",
+                    "score":       round(ev, 4),
+                    "model_value": round(pred, 2) if pred is not None else None,
+                    "extra":       f"P({ou_pick.lower()})={p:.3f} | pred {pred:.2f} vs line {line}"
+                                   f" | assumed {OU_ASSUMED_PRICE}",
+                })
 
     top = pd.DataFrame(rows)
-    return top.sort_values("score", ascending=False).head(5).reset_index(drop=True) if not top.empty else top
+    if top.empty:
+        return top
+    return top.sort_values("score", ascending=False).head(5).reset_index(drop=True)
 
 
 # =============================================================================
@@ -1172,6 +1388,10 @@ def upsert_predictions(pred_df: pd.DataFrame) -> None:
         "play_rank","play_type","play_score","play_detail",
         "market_home_ml","market_away_ml",
         "market_home_prob","market_away_prob","market_total_line",
+        # betting-layer audit columns
+        "market_home_prob_novig","home_win_prob_raw",
+        "ml_edge","p_over","ou_edge","rl_home_cover_prob",
+        "sigma_total_used","sigma_rd_used","model_edge",
     ]
 
     cols       = [c for c in base_cols if c in pred_df.columns]
@@ -1237,14 +1457,12 @@ def main() -> None:
 
     bundle = load_model_bundle()
 
-    # -------------------------------------------------------------------------
-    # FEATURE COLUMNS
-    # NOTE: run_diff_form_diff, runs_scored_diff, runs_allowed_diff, win_pct_diff
-    # were removed — they are derived diffs that nearly duplicate signals already
-    # present in the raw home/away features, causing triple-counting of form and
-    # win% signal. Removing them frees weight for SP and lineup features.
-    # Retrain mlb_model.pkl after making this change.
-    # -------------------------------------------------------------------------
+    sigma_total = bundle["sigma_total"]
+    sigma_rd    = bundle["sigma_rd"]
+    total_bias  = bundle["total_bias"]
+    log(f"Uncertainty: sigma_total={sigma_total:.2f}  sigma_rd={sigma_rd:.2f}  "
+        f"total_bias={'n/a (old bundle)' if total_bias is None else f'{total_bias:+.2f}'}")
+
     feature_cols = bundle.get("feature_cols") or [
         "era_diff", "whip_diff",
         "home_sp_rest_days", "away_sp_rest_days",
@@ -1266,39 +1484,75 @@ def main() -> None:
             features_df[col] = 0.0
 
     X = features_df[feature_cols].apply(pd.to_numeric, errors="coerce")
+
+    # Market features get neutral fills (0.5 prob / league-ish line), matching
+    # how retrain.py filled them. Everything else falls back to the median.
+    market_fills = bundle.get("market_fills", {})
     for col in X.columns:
-        fill = X[col].median() if X[col].notna().any() else 0.0
-        X[col] = X[col].fillna(fill if not pd.isna(fill) else 0.0)
+        if col in market_fills:
+            X[col] = X[col].fillna(market_fills[col])
+        else:
+            fill = X[col].median() if X[col].notna().any() else 0.0
+            X[col] = X[col].fillna(fill if not pd.isna(fill) else 0.0)
 
     log(f"Features ({len(feature_cols)}): {feature_cols}")
 
-    home_prob,  home_lo,  home_hi,  home_std  = predict_ml_ensemble(bundle["win_models"], X)
+    raw_prob,   home_lo,  home_hi,  home_std  = predict_ml_ensemble(bundle["win_models"], X)
     run_pred,   run_lo,   run_hi,   run_std   = predict_regression_ensemble(bundle["run_models"], X)
     total_pred, total_lo, total_hi, total_std = predict_regression_ensemble(bundle["total_models"], X)
 
-    # No post-hoc calibration — raw XGBoost ensemble probabilities used directly.
-    # The binary:logistic objective already produces well-spread, meaningful probs
-    # (e.g. 26%-74%) and any sigmoid/isotonic layer compresses them to ~53-55%.
+    # -------------------------------------------------------------------------
+    # CALIBRATION IS MANDATORY.
+    # If Platt scaling compresses raw 26%/74% outputs toward 45-58%, that is
+    # the honest out-of-sample signal — the raw model was overconfident.
+    # Wide raw probabilities feel better but lose to the vig at real prices.
+    # -------------------------------------------------------------------------
+    calibrator = bundle.get("calibrator")
+    if calibrator is not None:
+        home_prob = np.asarray(calibrator.predict(raw_prob))
+        log(f"Calibration applied: raw mean {np.mean(raw_prob):.3f} "
+            f"(5-95th: {np.percentile(raw_prob,5):.2f}-{np.percentile(raw_prob,95):.2f})"
+            f" → cal mean {np.mean(home_prob):.3f} "
+            f"(5-95th: {np.percentile(home_prob,5):.2f}-{np.percentile(home_prob,95):.2f})")
+    else:
+        home_prob = raw_prob
+        log("⚠️  No calibrator in bundle — using raw probabilities. Retrain with new retrain.py.")
+
+    home_prob = home_prob - HOME_BIAS_CORRECTION  # default 0.0; legacy escape hatch
+
+    # Bias correction on totals: measured OOF bias from the bundle, else the
+    # legacy env constant (default 0.0).
+    bias_shift = -(total_bias) if total_bias is not None else TOTAL_CALIBRATION
+    if total_bias is not None:
+        log(f"Applying measured total bias correction: {bias_shift:+.2f} runs")
+    elif TOTAL_CALIBRATION != 0.0:
+        log(f"Applying legacy TOTAL_CALIBRATION: {TOTAL_CALIBRATION:+.2f} runs")
 
     out = features_df.copy()
+    out["home_win_prob_raw"] = raw_prob
     out["home_win_prob"]     = home_prob
     out["away_win_prob"]     = 1.0 - home_prob
-    out["home_win_prob_lo"]  = home_lo
+    out["home_win_prob_lo"]  = home_lo    # ensemble seed spread — monitoring only
     out["home_win_prob_hi"]  = home_hi
     out["home_win_prob_std"] = home_std
     out["home_ml_implied"]   = out["home_win_prob"].apply(safe_moneyline_from_prob)
     out["away_ml_implied"]   = out["away_win_prob"].apply(safe_moneyline_from_prob)
     out["run_diff_pred"]     = run_pred
-    out["run_diff_lo"]       = run_lo
-    out["run_diff_hi"]       = run_hi
-    out["run_diff_std"]      = run_std
 
-    out["total_runs_pred"]   = total_pred + TOTAL_CALIBRATION
-    out["total_runs_lo"]     = total_lo   + TOTAL_CALIBRATION
-    out["total_runs_hi"]     = total_hi   + TOTAL_CALIBRATION
-    out["total_runs_std"]    = total_std
+    # lo/hi now reflect REAL uncertainty (±1 sigma), not ensemble seed spread.
+    out["run_diff_lo"]       = run_pred - sigma_rd
+    out["run_diff_hi"]       = run_pred + sigma_rd
+    out["run_diff_std"]      = sigma_rd
 
-    out = build_pick_columns(out)
+    out["total_runs_pred"]   = total_pred + bias_shift
+    out["total_runs_lo"]     = out["total_runs_pred"] - sigma_total
+    out["total_runs_hi"]     = out["total_runs_pred"] + sigma_total
+    out["total_runs_std"]    = sigma_total
+
+    out["sigma_total_used"]  = sigma_total
+    out["sigma_rd_used"]     = sigma_rd
+
+    out = build_pick_columns(out, sigma_total=sigma_total, sigma_rd=sigma_rd)
 
     top_plays = build_top_plays(out)
     out["play_rank"]   = None
@@ -1307,9 +1561,9 @@ def main() -> None:
     out["play_detail"] = None
 
     if top_plays.empty:
-        log("Top plays: none qualified")
+        log("\nTop plays: none qualified (no positive-EV edges today — that's a feature, not a bug)")
     else:
-        log("\nTOP 5 PLAYS OF THE DAY")
+        log("\nTOP 5 PLAYS OF THE DAY  (score = expected profit per $1 staked)")
         log(top_plays.to_string(index=False))
         for i, (_, row) in enumerate(top_plays.iterrows(), start=1):
             mask = out["game_pk"] == row["game_pk"]
@@ -1317,6 +1571,13 @@ def main() -> None:
             out.loc[mask, "play_type"]   = row["bet_type"]
             out.loc[mask, "play_score"]  = row["score"]
             out.loc[mask, "play_detail"] = row["extra"]
+
+    # quick sanity print: pick distribution (a wall of OVERs should never happen now)
+    if "ou_pick" in out.columns:
+        log(f"\nO/U picks: {out['ou_pick'].value_counts(dropna=False).to_dict()}")
+    if "ml_pick" in out.columns:
+        n_pass = int((out["ml_pick"] == "PASS").sum())
+        log(f"ML picks: {len(out) - n_pass} bets, {n_pass} passes")
 
     upsert_predictions(out)
 
