@@ -194,6 +194,115 @@ def add_ats_cover_rate(games, window=ATS_WINDOW):
     return games
 
 
+# ------------------------------------------------------------------
+# GAME_FEATURES JOIN  (FIP / wRC+ / park — the backfilled as-of-date signal)
+# ------------------------------------------------------------------
+
+def add_market_features(games):
+    """
+    Join market_odds so the model can learn to predict the RESIDUAL vs the
+    closing line instead of fighting it from scratch. This is the single
+    highest-value feature addition — without a market anchor the model drifts
+    toward 50/50 and calibration compresses everything.
+
+    Brings in:
+      market_home_prob_novig  — de-vigged market home win probability
+      market_total_line       — the market's total
+
+    De-vig: normalize the two implied probabilities so they sum to 1. Uses
+    market_home_prob/away_prob if present, else derives from the moneylines.
+    Joins on date+teams (market_odds game_pk is ~90% populated; date+teams is
+    the more complete key here).
+    """
+    print("Joining market_odds (de-vigged prob + total line)...")
+    try:
+        mo = pd.read_sql("""
+            SELECT official_date, home_team, away_team,
+                   market_home_ml, market_away_ml,
+                   market_home_prob, market_away_prob,
+                   market_total_line
+            FROM market_odds
+        """, engine)
+        if mo.empty:
+            print("  ⚠️  market_odds empty — market features will be absent")
+            games["market_home_prob_novig"] = pd.NA
+            games["market_total_line_feat"] = pd.NA
+            return games
+
+        mo["official_date"] = pd.to_datetime(mo["official_date"])
+
+        def ml_to_prob(ml):
+            try:
+                m = float(ml)
+            except (TypeError, ValueError):
+                return None
+            if m == 0 or pd.isna(m):
+                return None
+            return (-m / (-m + 100.0)) if m < 0 else (100.0 / (m + 100.0))
+
+        hp = pd.to_numeric(mo["market_home_prob"], errors="coerce")
+        ap = pd.to_numeric(mo["market_away_prob"], errors="coerce")
+        hp = hp.fillna(mo["market_home_ml"].map(ml_to_prob))
+        ap = ap.fillna(mo["market_away_ml"].map(ml_to_prob))
+        denom = hp + ap
+        mo["market_home_prob_novig"] = (hp / denom).where(denom > 0)
+        mo["market_total_line_feat"] = pd.to_numeric(mo["market_total_line"], errors="coerce")
+
+        keep = mo[["official_date", "home_team", "away_team",
+                   "market_home_prob_novig", "market_total_line_feat"]].drop_duplicates(
+                   subset=["official_date", "home_team", "away_team"])
+
+        before = len(games)
+        games = games.merge(keep, on=["official_date", "home_team", "away_team"], how="left")
+        if len(games) != before:
+            print(f"  ⚠️  row count changed {before}->{len(games)} (dup odds rows?)")
+
+        cov = games["market_home_prob_novig"].notna().mean()
+        print(f"  market join: {cov:.1%} of games have de-vigged market prob")
+    except Exception as e:
+        print(f"  ⚠️  market_odds join failed: {e}")
+        games["market_home_prob_novig"] = pd.NA
+        games["market_total_line_feat"] = pd.NA
+    return games
+
+
+def add_game_features(games):
+    """
+    Join the game_features table produced by backfill_pitching_offense.py.
+    These are strict as-of-date, leak-free, id-based FIP/WHIP, bullpen FIP,
+    offense proxy, and park factors — the real pitching/park signal the
+    totals model needs. Without this join, none of that reaches training.
+    """
+    print("Joining game_features (as-of-date FIP / offense / park)...")
+    try:
+        gf = pd.read_sql("""
+            SELECT game_pk,
+                   home_sp_fip, away_sp_fip,
+                   home_sp_whip, away_sp_whip,
+                   home_bullpen_fip, away_bullpen_fip,
+                   home_wrc_plus, away_wrc_plus,
+                   park_run_factor, park_hr_factor,
+                   sp_fip_diff, bullpen_fip_diff, offense_wrc_diff
+            FROM game_features
+        """, engine)
+        if gf.empty:
+            print("  ⚠️  game_features is empty — run backfill_pitching_offense.py first!")
+            return games
+
+        before = len(games)
+        games = games.merge(gf, on="game_pk", how="left")
+
+        cov = games["sp_fip_diff"].notna().mean()
+        real = (games["sp_fip_diff"].fillna(0) != 0).mean()
+        print(f"  game_features join: {cov:.1%} of games have a feature row; "
+              f"{real:.1%} have non-zero sp_fip_diff (real pitching signal)")
+        if before != len(games):
+            print(f"  ⚠️  row count changed {before}->{len(games)} (duplicate game_pk in game_features?)")
+    except Exception as e:
+        print(f"  ⚠️  game_features join failed: {e}")
+    return games
+
+
 def add_lineup_features(games):
     """
     Pull lineup OPS and hard-hit features from the predictions table.
@@ -268,6 +377,15 @@ def build_training_dataset():
     games["game_date"] = pd.to_datetime(games.get("game_date", games.get("official_date")))
     games["season"]    = games.game_date.dt.year
     games = games.dropna(subset=["home_score", "away_score"])
+
+    # Drop spring training / preseason. Regular seasons open late March; ST
+    # games (Feb + early March) have no prior FIP history AND unrepresentative
+    # scoring, so they poison a totals model. Keep ~Mar 18 onward each year.
+    before_st = len(games)
+    doy = games["game_date"].dt.strftime("%m-%d")
+    games = games[doy >= "03-18"].copy()
+    print(f"Rows after dropping spring training (< Mar 18): {len(games)} "
+          f"(removed {before_st - len(games)})")
 
     # League average fallbacks
     pitchers["pitcher_name_clean"] = pitchers["pitcher_name"].apply(clean_name)
@@ -371,6 +489,53 @@ def build_training_dataset():
     print("Adding lineup features from predictions table...")
     games = add_lineup_features(games)
 
+    print("Joining backfilled game_features...")
+    games = add_game_features(games)
+
+    print("Joining market_odds features...")
+    games = add_market_features(games)
+    # retrain.py's MARKET_FEATURE_COLS expects 'market_total_line'; expose it
+    # under that name (the raw games column, if any, is unused by the model).
+    if "market_total_line_feat" in games.columns:
+        games["market_total_line"] = games["market_total_line_feat"]
+
+    # Prefer real as-of-date FIP diff over the crude name-based ERA diff.
+    # Keep era_diff for backward compatibility, but sp_fip_diff is the better
+    # pitching signal and is what retrain.py should weight for totals.
+    if "sp_fip_diff" in games.columns:
+        games["sp_fip_diff"] = pd.to_numeric(games["sp_fip_diff"], errors="coerce").fillna(0.0)
+    if "bullpen_fip_diff" in games.columns:
+        games["bullpen_fip_diff"] = pd.to_numeric(games["bullpen_fip_diff"], errors="coerce").fillna(0.0)
+    if "offense_wrc_diff" in games.columns:
+        games["offense_wrc_diff"] = pd.to_numeric(games["offense_wrc_diff"], errors="coerce").fillna(0.0)
+    for c in ["home_wrc_plus", "away_wrc_plus"]:
+        if c in games.columns:
+            games[c] = pd.to_numeric(games[c], errors="coerce").fillna(100.0)
+    for c in ["park_run_factor", "park_hr_factor"]:
+        if c in games.columns:
+            games[c] = pd.to_numeric(games[c], errors="coerce").fillna(1.0)
+
+    # ------------------------------------------------------------------
+    # Weather — join from game_weather table
+    # wind_out_factor: +ve = wind blowing out (adds runs), -ve = blowing in
+    # Domes get is_dome=True; their weather cols are left NULL and filled below.
+    # ------------------------------------------------------------------
+    try:
+        weather = pd.read_sql("""
+            SELECT game_pk,
+                   temp_f, wind_speed_mph, wind_out_factor,
+                   precip_mm, visibility_m, cloud_cover_pct, is_dome
+            FROM game_weather
+        """, engine)
+        if not weather.empty:
+            games = games.merge(weather, on="game_pk", how="left")
+            coverage = games["temp_f"].notna().mean()
+            print(f"Weather joined: {len(weather)} rows  coverage={coverage:.1%}")
+        else:
+            print("⚠️  game_weather is empty — run backfill_weather.py first")
+    except Exception as e:
+        print(f"⚠️  Weather join failed: {e} — continuing without weather")
+
     # Fill defaults
     games = games.fillna({
         "home_last10_runs_scored":  4.5,
@@ -395,7 +560,23 @@ def build_training_dataset():
         "away_lineup_ops_vs_sp":    LEAGUE_AVG_OPS,
         "home_lineup_hard_hit":     LEAGUE_AVG_HH,
         "away_lineup_hard_hit":     LEAGUE_AVG_HH,
+        # Weather defaults: league-average conditions, dome=False
+        "temp_f":           72.0,    # comfortable room-ish temp
+        "wind_speed_mph":    5.0,
+        "wind_out_factor":   0.0,    # neutral (crosswind)
+        "precip_mm":         0.0,
+        "visibility_m":  10000.0,    # clear visibility
+        "cloud_cover_pct":  50.0,
+        "is_dome":          False,
     })
+
+    # For domes: zero out weather effects (dome overrides any fetched values)
+    if "is_dome" in games.columns:
+        dome_mask = games["is_dome"].astype(bool)
+        games.loc[dome_mask, "wind_out_factor"] = 0.0
+        games.loc[dome_mask, "temp_f"]          = 72.0   # controlled temp
+        games.loc[dome_mask, "precip_mm"]       = 0.0
+        games.loc[dome_mask, "visibility_m"]    = 10000.0
 
     print(f"\nFinal rows: {len(games)}")
     print(f"ERA diff variance: std={games['era_diff'].std():.3f}")

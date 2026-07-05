@@ -1,16 +1,27 @@
 """
-ml/retrain.py  —  MLB model retraining with sharper features
+ml/retrain.py  —  MLB model retraining with market-aware features
 Run from the project root:
     python ml/retrain.py
 
-Improvements over previous version:
-  1. Elo ratings  — computed game-by-game from history (no lookahead)
-  2. Ballpark run factor  — park-adjusted totals for O/U
-  3. Form trend  — (last5 run diff) - (last10 run diff): positive = heating up
-  4. Neutral win %  — overall win%, not split by venue (removes venue bleed)
-  5. Time-series cross-validation  — train on past, score on future only
-  6. Isotonic calibration  — fixes overconfident win probabilities
-  7. Saves new mlb_model.pkl, win_model.pkl, run_model.pkl, total_model.pkl
+Changes in this version (betting-layer overhaul):
+  1. MARKET FEATURES — de-vigged market win probability and the market total
+     line are now model inputs (when coverage in training_data.csv is high
+     enough). The model learns to predict the RESIDUAL vs the market instead
+     of fighting the closing line from scratch.
+  2. OUT-OF-FOLD CALIBRATION — the Platt calibrator is now fit on true
+     out-of-fold predictions from the time-series CV (never on data the
+     models trained on). The engine MUST apply this calibrator.
+  3. RESIDUAL SIGMAS — sigma_total and sigma_rd (std dev of out-of-fold
+     residuals) are saved in the bundle. These are the REAL uncertainty of a
+     prediction, used by the engine to compute P(over), P(cover), etc.
+     (Ensemble seed-spread is NOT uncertainty — 20 same-data models with
+     different seeds barely disagree.)
+  4. MEASURED TOTAL BIAS — mean(pred - actual) on out-of-fold totals is
+     saved as total_bias. The engine subtracts it. This replaces the
+     hand-tuned TOTAL_CALIBRATION=-1.2 fudge with a measured number.
+  5. FINAL ENSEMBLE TRAINS ON ALL DATA — previously the last 20% was held
+     out for calibration and never used for training. OOF calibration frees
+     that data back up.
 """
 
 from __future__ import annotations
@@ -34,6 +45,10 @@ from xgboost import XGBClassifier, XGBRegressor
 BASE_DIR   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ML_DIR     = os.path.join(BASE_DIR, "ml")
 DATA_PATH  = os.path.join(ML_DIR, "training_data.csv")
+
+# Market features are only included if at least this fraction of training
+# rows have real market data (avoids training on a constant default column).
+MARKET_COVERAGE_MIN = 0.40
 
 # ---------------------------------------------------------------------------
 # 1. MLB Ballpark Run Factors (2024-25 average, 100 = league average)
@@ -75,8 +90,8 @@ PARK_FACTORS: dict[str, float] = {
 # ---------------------------------------------------------------------------
 # 2. Elo ratings — computed chronologically, no lookahead
 # ---------------------------------------------------------------------------
-ELO_START   = 1500.0
-ELO_K       = 20.0
+ELO_START    = 1500.0
+ELO_K        = 20.0
 ELO_HOME_ADV = 35.0   # home field bump in Elo
 
 
@@ -121,7 +136,59 @@ def compute_elo(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# 3. Feature engineering
+# 3. Market feature helpers — de-vig the moneyline
+# ---------------------------------------------------------------------------
+def american_to_prob(ml) -> float | None:
+    """Convert American odds to implied probability (with vig)."""
+    try:
+        m = float(ml)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(m) or m == 0:
+        return None
+    if m < 0:
+        return -m / (-m + 100.0)
+    return 100.0 / (m + 100.0)
+
+
+def add_market_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds:
+      market_home_prob_novig — vig-removed home win probability
+      market_total_line      — already in CSV if odds were joined at build time
+
+    De-vig by normalizing the two implied probabilities so they sum to 1.
+    Priority: use market_home_prob/market_away_prob columns if present,
+    otherwise derive from market_home_ml/market_away_ml.
+    """
+    df = df.copy()
+
+    hp = pd.to_numeric(df.get("market_home_prob"), errors="coerce") \
+        if "market_home_prob" in df.columns else pd.Series(np.nan, index=df.index)
+    ap = pd.to_numeric(df.get("market_away_prob"), errors="coerce") \
+        if "market_away_prob" in df.columns else pd.Series(np.nan, index=df.index)
+
+    # fall back to moneylines where prob columns are missing
+    if "market_home_ml" in df.columns:
+        hp_ml = df["market_home_ml"].map(american_to_prob)
+        ap_ml = df["market_away_ml"].map(american_to_prob) if "market_away_ml" in df.columns else np.nan
+        hp = hp.fillna(pd.to_numeric(hp_ml, errors="coerce"))
+        ap = ap.fillna(pd.to_numeric(ap_ml, errors="coerce"))
+
+    denom = hp + ap
+    novig = np.where((denom > 0) & hp.notna() & ap.notna(), hp / denom, np.nan)
+    df["market_home_prob_novig"] = novig
+
+    if "market_total_line" in df.columns:
+        df["market_total_line"] = pd.to_numeric(df["market_total_line"], errors="coerce")
+    else:
+        df["market_total_line"] = np.nan
+
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 4. Feature engineering
 # ---------------------------------------------------------------------------
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -132,9 +199,10 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- Park factor
     df["home_park_factor"] = df["home_team"].map(PARK_FACTORS).fillna(1.0)
 
+    # --- Market features (de-vigged)
+    df = add_market_features(df)
+
     # --- Form trend: positive = team is heating up (last 5 better than last 10)
-    #     We proxy with run_diff: if last10 data exists, assume last5 ≈ last10 * trend
-    #     We'll compute it properly from rolling windows per team
     df = df.sort_values("game_date_utc").reset_index(drop=True)
 
     home_last5_rd: list[float] = []
@@ -171,9 +239,6 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["form_trend_diff"]  = df["home_form_trend"]    - df["away_form_trend"]
 
     # --- Neutral win % (not split by venue)
-    #     Approximate from home_win_pct_home and away_win_pct_away weighted equally
-    #     A team with 0.60 home, 0.45 away ≈ 0.525 neutral
-    #     We'll store both so the model can learn the interaction
     df["home_neutral_win_pct"] = (df["home_win_pct_home"] * 0.5 + (1 - df["away_win_pct_away"]) * 0.5)
     df["away_neutral_win_pct"] = (df["away_win_pct_away"] * 0.5 + (1 - df["home_win_pct_home"]) * 0.5)
     df["neutral_win_pct_diff"] = df["home_neutral_win_pct"] - df["away_neutral_win_pct"]
@@ -199,9 +264,9 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# 4. Feature columns
+# 5. Feature columns
 # ---------------------------------------------------------------------------
-FEATURE_COLS = [
+BASE_FEATURE_COLS = [
     # Elo — most predictive single signal
     "elo_diff",
     "home_elo_pre",
@@ -213,6 +278,14 @@ FEATURE_COLS = [
     # Pitcher quality
     "era_diff",
     "whip_diff",
+    # as-of-date FIP from game_features (the backfill) — real pitching signal
+    "sp_fip_diff",
+    "bullpen_fip_diff",
+    "offense_wrc_diff",
+    "home_wrc_plus",
+    "away_wrc_plus",
+    "park_run_factor",
+
 
     # Rest / bullpen
     "home_sp_rest_days",
@@ -261,11 +334,41 @@ FEATURE_COLS = [
     "lineup_ops_diff",
     "home_lineup_hard_hit",
     "away_lineup_hard_hit",
+
+    # Weather — from game_weather table (backfilled via backfill_weather.py)
+    # wind_out_factor: +ve = wind blowing out (inflates runs), -ve = blowing in
+    # Domes are set to wind_out_factor=0, temp=72, precip=0 before training.
+    "temp_f",
+    "wind_out_factor",
+    "precip_mm",
+    "visibility_m",
 ]
+
+# Included only if coverage in training data clears MARKET_COVERAGE_MIN.
+MARKET_FEATURE_COLS = [
+    "market_home_prob_novig",
+    "market_total_line",
+]
+
+# Neutral fill values for market features when a row is missing odds.
+# (0.0 would be a nonsense probability / line — these keep missing rows sane.)
+MARKET_FILLS = {
+    "market_home_prob_novig": 0.5,
+    "market_total_line":      8.5,
+}
+
+# Neutral fill values for weather features when a row is missing weather data.
+# These represent typical MLB conditions (outdoor, comfortable, calm).
+WEATHER_FILLS = {
+    "temp_f":           72.0,   # comfortable outdoor temp
+    "wind_out_factor":   0.0,   # neutral crosswind
+    "precip_mm":         0.0,   # no rain
+    "visibility_m":  10000.0,   # clear visibility
+}
 
 
 # ---------------------------------------------------------------------------
-# 5. Model configs
+# 6. Model configs
 # ---------------------------------------------------------------------------
 WIN_PARAMS = dict(
     objective="binary:logistic",
@@ -298,13 +401,22 @@ N_MODELS = 20   # ensemble size (different random seeds)
 
 
 # ---------------------------------------------------------------------------
-# 6. Time-series cross-validation
+# 7. Time-series cross-validation
+#    Now also collects OUT-OF-FOLD predictions, which drive:
+#      - Platt calibration (fit on data the models never saw)
+#      - sigma_total / sigma_rd (real predictive uncertainty)
+#      - total_bias (measured, replaces the hand-tuned fudge)
 # ---------------------------------------------------------------------------
 def run_cv(X: pd.DataFrame, y_win: pd.Series, y_rd: pd.Series, y_tot: pd.Series):
     tscv = TimeSeriesSplit(n_splits=5, gap=30)  # 30-game gap prevents leakage
 
     win_logloss, win_brier, win_acc = [], [], []
     rd_mae, tot_mae = [], []
+
+    oof_idx:      list[np.ndarray] = []
+    oof_win_prob: list[np.ndarray] = []
+    oof_rd_pred:  list[np.ndarray] = []
+    oof_tot_pred: list[np.ndarray] = []
 
     for fold, (tr_idx, te_idx) in enumerate(tscv.split(X)):
         X_tr, X_te = X.iloc[tr_idx], X.iloc[te_idx]
@@ -323,29 +435,47 @@ def run_cv(X: pd.DataFrame, y_win: pd.Series, y_rd: pd.Series, y_tot: pd.Series)
 
         rm = XGBRegressor(**REG_PARAMS)
         rm.fit(X_tr, y_rd_tr, verbose=False)
-        rd_mae.append(mean_absolute_error(y_rd_te, rm.predict(X_te)))
+        rd_p = rm.predict(X_te)
+        rd_mae.append(mean_absolute_error(y_rd_te, rd_p))
 
         tm = XGBRegressor(**REG_PARAMS)
         tm.fit(X_tr, y_tot_tr, verbose=False)
-        tot_mae.append(mean_absolute_error(y_tot_te, tm.predict(X_te)))
+        tot_p = tm.predict(X_te)
+        tot_mae.append(mean_absolute_error(y_tot_te, tot_p))
+
+        oof_idx.append(te_idx)
+        oof_win_prob.append(prob)
+        oof_rd_pred.append(rd_p)
+        oof_tot_pred.append(tot_p)
 
         print(f"  Fold {fold+1}: win_acc={win_acc[-1]:.3f}  logloss={win_logloss[-1]:.4f}  "
               f"rd_mae={rd_mae[-1]:.2f}  tot_mae={tot_mae[-1]:.2f}")
 
     print(f"\n  CV means: win_acc={np.mean(win_acc):.3f}  logloss={np.mean(win_logloss):.4f}  "
           f"brier={np.mean(win_brier):.4f}  rd_mae={np.mean(rd_mae):.2f}  tot_mae={np.mean(tot_mae):.2f}")
-    return np.mean(win_acc)
+
+    oof = {
+        "idx":      np.concatenate(oof_idx),
+        "win_prob": np.concatenate(oof_win_prob),
+        "rd_pred":  np.concatenate(oof_rd_pred),
+        "tot_pred": np.concatenate(oof_tot_pred),
+    }
+    return np.mean(win_acc), oof
 
 
 # ---------------------------------------------------------------------------
-# 7. Platt scaling calibration on a held-out slice
+# 8. Platt scaling calibration — fit on OUT-OF-FOLD predictions
 # ---------------------------------------------------------------------------
 class PlattCalibrator:
     """
     Sigmoid (Platt scaling) calibrator. Wraps a LogisticRegression so it
     exposes a .predict(proba_array) → calibrated_proba_array interface
-    compatible with the engine. Unlike isotonic regression, sigmoid calibration
-    produces a smooth monotonic curve — every game gets a distinct win probability.
+    compatible with the engine.
+
+    IMPORTANT: the engine must apply this. If the calibrator compresses raw
+    26%/74% outputs toward 45-58%, that compression IS the honest signal —
+    it means the raw model is overconfident on held-out data. Betting the
+    raw probabilities against real prices loses to the vig.
     """
     def __init__(self, lr: LogisticRegression):
         self.lr = lr
@@ -355,24 +485,18 @@ class PlattCalibrator:
         return self.lr.predict_proba(arr)[:, 1]
 
 
-def calibrate_win_models(win_models: list, X_cal: pd.DataFrame, y_cal: pd.Series):
-    """
-    Fit a Platt (sigmoid) calibrator on ensemble win probabilities
-    from a held-out calibration set (last 20% of data by time).
-    Returns a PlattCalibrator that maps raw proba → calibrated proba.
-    """
-    raw_probas = np.mean([m.predict_proba(X_cal)[:, 1] for m in win_models], axis=0)
+def fit_calibrator_oof(oof_prob: np.ndarray, y_oof: np.ndarray) -> PlattCalibrator:
     lr = LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000)
-    lr.fit(raw_probas.reshape(-1, 1), y_cal)
+    lr.fit(np.asarray(oof_prob).reshape(-1, 1), np.asarray(y_oof))
     return PlattCalibrator(lr)
 
 
 # ---------------------------------------------------------------------------
-# 8. Main
+# 9. Main
 # ---------------------------------------------------------------------------
 def main():
     print("=" * 60)
-    print("MLB Model Retrain")
+    print("MLB Model Retrain (market-aware, OOF-calibrated)")
     print("=" * 60)
 
     # --- Load data
@@ -387,29 +511,90 @@ def main():
     print("\nEngineering features ...")
     df = build_features(df)
 
-    X = df[FEATURE_COLS].fillna(0.0)
+    # --- Decide whether market features make the cut
+    feature_cols = list(BASE_FEATURE_COLS)
+    market_coverage = float(df["market_home_prob_novig"].notna().mean())
+    line_coverage   = float(df["market_total_line"].notna().mean())
+    print(f"\nMarket data coverage: novig prob {market_coverage:.1%}, total line {line_coverage:.1%}")
+
+    use_market = market_coverage >= MARKET_COVERAGE_MIN
+    if use_market:
+        feature_cols += MARKET_FEATURE_COLS
+        print("  ✅ Market features INCLUDED — model will learn residual vs the closing line.")
+    else:
+        print("  ⚠️  Market features EXCLUDED (coverage too low).")
+        print("     Backfill market_odds into training_data.csv via build_dataset.py —")
+        print("     this is the single highest-value data improvement available.")
+
+    # neutral fills for market and weather cols, 0.0 for everything else
+    X = df[feature_cols].copy()
+    for col, fill in {**MARKET_FILLS, **WEATHER_FILLS}.items():
+        if col in X.columns:
+            X[col] = X[col].fillna(fill)
+
+    # Report weather coverage so we know how much signal is real vs filled
+    for wcol in ["temp_f", "wind_out_factor", "precip_mm", "visibility_m"]:
+        if wcol in df.columns:
+            cov = df[wcol].notna().mean()
+            if cov < 0.5:
+                print(f"  ⚠️  Weather col {wcol}: only {cov:.1%} coverage — run backfill_weather.py")
+            else:
+                print(f"  ✅ Weather col {wcol}: {cov:.1%} coverage")
+
+    X = X.fillna(0.0)
+
     y_win = df["home_win"].astype(int)
     y_rd  = df["run_diff"].fillna(0.0)
     y_tot = df["total_runs"].fillna(0.0)
 
-    print(f"  Features: {len(FEATURE_COLS)}")
+    print(f"  Features: {len(feature_cols)}")
     print(f"  Home win rate: {y_win.mean():.3f}")
 
-    # --- Cross-validation
+    # --- Cross-validation + out-of-fold predictions
     print("\nTime-series cross-validation ...")
-    cv_acc = run_cv(X, y_win, y_rd, y_tot)
+    cv_acc, oof = run_cv(X, y_win, y_rd, y_tot)
 
-    # --- Calibration split (last 20% by time, never seen in CV training)
-    cal_cutoff = int(len(df) * 0.80)
-    X_cal   = X.iloc[cal_cutoff:]
-    y_cal   = y_win.iloc[cal_cutoff:]
-    X_train = X.iloc[:cal_cutoff]
-    y_win_tr = y_win.iloc[:cal_cutoff]
-    y_rd_tr  = y_rd.iloc[:cal_cutoff]
-    y_tot_tr = y_tot.iloc[:cal_cutoff]
+    idx        = oof["idx"]
+    y_win_oof  = y_win.iloc[idx].to_numpy()
+    y_rd_oof   = y_rd.iloc[idx].to_numpy()
+    y_tot_oof  = y_tot.iloc[idx].to_numpy()
 
-    # --- Train ensemble on full data (excluding cal set)
-    print(f"\nTraining {N_MODELS}-model ensemble on {len(X_train)} games ...")
+    # --- Real predictive uncertainty from OOF residuals
+    rd_resid  = y_rd_oof  - oof["rd_pred"]
+    tot_resid = y_tot_oof - oof["tot_pred"]
+
+    sigma_rd    = float(np.std(rd_resid))
+    sigma_total = float(np.std(tot_resid))
+    total_bias  = float(np.mean(oof["tot_pred"] - y_tot_oof))   # + = model over-predicts runs
+    rd_bias     = float(np.mean(oof["rd_pred"]  - y_rd_oof))
+
+    print("\nOut-of-fold residual diagnostics:")
+    print(f"  sigma_total = {sigma_total:.2f} runs   (real O/U uncertainty — NOT ensemble spread)")
+    print(f"  sigma_rd    = {sigma_rd:.2f} runs   (real margin uncertainty)")
+    print(f"  total_bias  = {total_bias:+.2f} runs  (engine subtracts this; replaces TOTAL_CALIBRATION fudge)")
+    print(f"  rd_bias     = {rd_bias:+.2f} runs")
+    if abs(total_bias) > 0.5:
+        print("  ⚠️  Total bias > 0.5 runs — check train/serve feature skew "
+              "(blended prior-season baselines vs true rolling stats).")
+
+    # --- Calibrate win probabilities on OOF predictions
+    print("\nFitting Platt calibration on out-of-fold predictions ...")
+    calibrator = fit_calibrator_oof(oof["win_prob"], y_win_oof)
+
+    cal_prob = calibrator.predict(oof["win_prob"])
+    print(f"  Pre-cal  log_loss: {log_loss(y_win_oof, oof['win_prob']):.4f}  "
+          f"brier: {brier_score_loss(y_win_oof, oof['win_prob']):.4f}")
+    print(f"  Post-cal log_loss: {log_loss(y_win_oof, cal_prob):.4f}  "
+          f"brier: {brier_score_loss(y_win_oof, cal_prob):.4f}")
+    print(f"  Raw mean prob: {oof['win_prob'].mean():.3f}  Cal mean: {cal_prob.mean():.3f}  "
+          f"Actual: {y_win_oof.mean():.3f}")
+    print(f"  Raw spread (5th-95th pct): {np.percentile(oof['win_prob'],5):.2f}–{np.percentile(oof['win_prob'],95):.2f}"
+          f"  →  Cal: {np.percentile(cal_prob,5):.2f}–{np.percentile(cal_prob,95):.2f}")
+    print("  (If calibration compresses the spread a lot, the raw model was overconfident.")
+    print("   The compressed probabilities are the ones that pay against real prices.)")
+
+    # --- Train final ensemble on ALL data (OOF calibration freed up the holdout)
+    print(f"\nTraining {N_MODELS}-model ensemble on all {len(X)} games ...")
 
     win_models   = []
     rd_models    = []
@@ -419,35 +604,24 @@ def main():
         seed = 1000 + i * 7
 
         wm = XGBClassifier(**{**WIN_PARAMS, "random_state": seed})
-        wm.fit(X_train, y_win_tr, verbose=False)
+        wm.fit(X, y_win, verbose=False)
         win_models.append(wm)
 
         rm = XGBRegressor(**{**REG_PARAMS, "random_state": seed})
-        rm.fit(X_train, y_rd_tr, verbose=False)
+        rm.fit(X, y_rd, verbose=False)
         rd_models.append(rm)
 
         tm = XGBRegressor(**{**REG_PARAMS, "random_state": seed})
-        tm.fit(X_train, y_tot_tr, verbose=False)
+        tm.fit(X, y_tot, verbose=False)
         total_models.append(tm)
 
         if (i + 1) % 5 == 0:
             print(f"  Trained {i+1}/{N_MODELS}")
 
-    # --- Calibrate win proba
-    print("\nFitting Platt (sigmoid) calibration on held-out set ...")
-    calibrator = calibrate_win_models(win_models, X_cal, y_cal)
-
-    # Check calibration improvement
-    raw = np.mean([m.predict_proba(X_cal)[:, 1] for m in win_models], axis=0)
-    cal_prob = calibrator.predict(raw)
-    print(f"  Pre-cal  log_loss: {log_loss(y_cal, raw):.4f}  brier: {brier_score_loss(y_cal, raw):.4f}")
-    print(f"  Post-cal log_loss: {log_loss(y_cal, cal_prob):.4f}  brier: {brier_score_loss(y_cal, cal_prob):.4f}")
-    print(f"  Raw mean prob: {raw.mean():.3f}  Cal mean prob: {cal_prob.mean():.3f}  Actual: {y_cal.mean():.3f}")
-
     # --- Feature importance
     importances = pd.Series(
         np.mean([m.feature_importances_ for m in win_models], axis=0),
-        index=FEATURE_COLS,
+        index=feature_cols,
     ).sort_values(ascending=False)
     print("\nTop 10 features (win model):")
     for feat, imp in importances.head(10).items():
@@ -457,29 +631,42 @@ def main():
     print("\nSaving model artifacts ...")
 
     meta = {
-        "features":      FEATURE_COLS,
-        "n_models":      N_MODELS,
-        "cv_win_acc":    float(cv_acc),
-        "park_factors":  PARK_FACTORS,
+        "features":        feature_cols,
+        "n_models":        N_MODELS,
+        "cv_win_acc":      float(cv_acc),
+        "park_factors":    PARK_FACTORS,
+        "sigma_total":     sigma_total,
+        "sigma_rd":        sigma_rd,
+        "total_bias":      total_bias,
+        "rd_bias":         rd_bias,
+        "uses_market":     use_market,
+        "market_fills":    {**MARKET_FILLS, **WEATHER_FILLS},
         "note": (
-            "Ensemble XGBoost + Elo + park factors + form trend + "
-            "neutral win% + isotonic calibration. "
-            "Time-series CV, no lookahead."
+            "Ensemble XGBoost + Elo + park factors + form trend + neutral win% "
+            "+ de-vigged market features. Platt calibration fit on out-of-fold "
+            "time-series CV predictions. sigma_total/sigma_rd are OOF residual "
+            "std devs — use for P(over)/P(cover). Engine MUST apply calibrator."
         ),
     }
 
     bundle = {
-        "win_models":      win_models,
-        "run_diff_models": rd_models,
+        "win_models":        win_models,
+        "run_diff_models":   rd_models,
         "total_runs_models": total_models,
-        "feature_cols":    FEATURE_COLS,
-        "n_models":        N_MODELS,
-        "calibrator":      calibrator,
-        "park_factors":    PARK_FACTORS,
+        "feature_cols":      feature_cols,
+        "n_models":          N_MODELS,
+        "calibrator":        calibrator,
+        "park_factors":      PARK_FACTORS,
+        "sigma_total":       sigma_total,
+        "sigma_rd":          sigma_rd,
+        "total_bias":        total_bias,
+        "rd_bias":           rd_bias,
+        "uses_market":       use_market,
+        "market_fills":      MARKET_FILLS,
     }
 
-    joblib.dump(bundle,      os.path.join(ML_DIR, "mlb_model.pkl"))
-    joblib.dump(meta,        os.path.join(ML_DIR, "mlb_meta.pkl"))
+    joblib.dump(bundle,          os.path.join(ML_DIR, "mlb_model.pkl"))
+    joblib.dump(meta,            os.path.join(ML_DIR, "mlb_meta.pkl"))
     joblib.dump(win_models[0],   os.path.join(ML_DIR, "win_model.pkl"))
     joblib.dump(rd_models[0],    os.path.join(ML_DIR, "run_model.pkl"))
     joblib.dump(total_models[0], os.path.join(ML_DIR, "total_model.pkl"))
@@ -488,7 +675,8 @@ def main():
     joblib.dump(total_models,    os.path.join(ML_DIR, "total_models.pkl"))
 
     print("  Saved: mlb_model.pkl, mlb_meta.pkl, win/run/total model(s).pkl")
-    print(f"\nDone. CV win accuracy: {cv_acc:.3f}")
+    print(f"\nDone. CV win accuracy: {cv_acc:.3f}  |  sigma_total: {sigma_total:.2f}  |  "
+          f"total_bias: {total_bias:+.2f}")
     print("=" * 60)
 
 
