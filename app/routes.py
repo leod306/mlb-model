@@ -332,7 +332,10 @@ def api_predict_today(game_date: str = Query(..., description="YYYY-MM-DD")):
             p.play_rank, p.play_type, p.play_score, p.play_detail,
             p.market_home_prob, p.market_away_prob, p.market_total_line,
             p.market_home_ml, p.market_away_ml, p.best_home_ml, p.best_away_ml,
-            p.model_edge
+            p.model_edge,
+            p.temp_f, p.humidity_pct, p.precip_prob, p.precip_mm,
+            p.wind_speed_mph, p.wind_dir_deg, p.wind_out_factor,
+            p.visibility_m, p.cloud_cover_pct, p.weather_code, p.is_dome
         FROM games g
         LEFT JOIN predictions p     ON p.game_pk = g.game_pk
         LEFT JOIN game_probables gp ON gp.game_pk = g.game_pk
@@ -387,6 +390,18 @@ def api_predict_today(game_date: str = Query(..., description="YYYY-MM-DD")):
             "best_home_ml":          safe_int(row.get("best_home_ml")),
             "best_away_ml":          safe_int(row.get("best_away_ml")),
             "model_edge":            safe_float(row.get("model_edge")),
+            # weather
+            "temp_f":                safe_float(row.get("temp_f")),
+            "humidity_pct":          safe_float(row.get("humidity_pct")),
+            "precip_prob":           safe_float(row.get("precip_prob")),
+            "precip_mm":             safe_float(row.get("precip_mm")),
+            "wind_speed_mph":        safe_float(row.get("wind_speed_mph")),
+            "wind_dir_deg":          safe_float(row.get("wind_dir_deg")),
+            "wind_out_factor":       safe_float(row.get("wind_out_factor")),
+            "visibility_m":          safe_float(row.get("visibility_m")),
+            "cloud_cover_pct":       safe_float(row.get("cloud_cover_pct")),
+            "weather_code":          safe_int(row.get("weather_code")),
+            "is_dome":               bool(row.get("is_dome")) if row.get("is_dome") is not None else None,
             "error":                 None if has_prediction else "No prediction available",
         })
     return {"ok": True, "date": game_date, "count": len(results), "predictions": results}

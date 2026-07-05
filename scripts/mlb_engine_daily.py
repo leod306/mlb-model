@@ -329,6 +329,17 @@ def ensure_predictions_table() -> None:
         "rl_home_cover_prob":     "DOUBLE PRECISION",  # P(home margin > 1.5)
         "sigma_total_used":       "DOUBLE PRECISION",
         "sigma_rd_used":          "DOUBLE PRECISION",
+        # --- weather columns ---
+        "temp_f":                 "DOUBLE PRECISION",
+        "humidity_pct":           "DOUBLE PRECISION",
+        "precip_prob":            "DOUBLE PRECISION",
+        "precip_mm":              "DOUBLE PRECISION",
+        "wind_out_factor":        "DOUBLE PRECISION",
+        "wind_dir_deg":           "DOUBLE PRECISION",
+        "visibility_m":           "DOUBLE PRECISION",
+        "cloud_cover_pct":        "DOUBLE PRECISION",
+        "weather_code":           "INT",
+        "is_dome":                "BOOLEAN",
     }
     existing = set(get_table_columns(PREDICTIONS_TABLE))
     with engine.begin() as conn:
@@ -478,6 +489,25 @@ def load_market_odds(game_pks: list) -> pd.DataFrame:
             return pd.read_sql(sql, conn, params={"pks": game_pks})
     except Exception as e:
         log(f"⚠️  market_odds load failed: {e}")
+        return pd.DataFrame()
+
+
+def load_weather_data(game_pks: list) -> pd.DataFrame:
+    if not game_pks or not table_exists("game_weather"):
+        return pd.DataFrame()
+    try:
+        sql = text("""
+            SELECT game_pk,
+                   temp_f, humidity_pct, precip_prob, precip_mm,
+                   wind_speed_mph, wind_dir_deg, wind_out_factor,
+                   visibility_m, cloud_cover_pct, weather_code, is_dome
+            FROM game_weather
+            WHERE game_pk = ANY(:pks)
+        """)
+        with engine.begin() as conn:
+            return pd.read_sql(sql, conn, params={"pks": game_pks})
+    except Exception as e:
+        log(f"⚠️  weather load failed: {e}")
         return pd.DataFrame()
 
 
@@ -1392,6 +1422,10 @@ def upsert_predictions(pred_df: pd.DataFrame) -> None:
         "market_home_prob_novig","home_win_prob_raw",
         "ml_edge","p_over","ou_edge","rl_home_cover_prob",
         "sigma_total_used","sigma_rd_used","model_edge",
+        # weather columns
+        "temp_f","humidity_pct","precip_prob","precip_mm",
+        "wind_speed_mph","wind_dir_deg","wind_out_factor",
+        "visibility_m","cloud_cover_pct","weather_code","is_dome",
     ]
 
     cols       = [c for c in base_cols if c in pred_df.columns]
@@ -1454,6 +1488,14 @@ def main() -> None:
     if features_df.empty:
         log("No features built.")
         return
+
+    # Join weather data (pass-through columns; used for display + future model features)
+    weather_df = load_weather_data(features_df["game_pk"].tolist())
+    if not weather_df.empty:
+        features_df = features_df.merge(weather_df, on="game_pk", how="left")
+        log(f"  weather joined: {len(weather_df)} rows")
+    else:
+        log("  ℹ️  no weather data — run load_weather.py first")
 
     bundle = load_model_bundle()
 

@@ -171,6 +171,42 @@ function pickClass(pick) {
   return "";
 }
 
+function weatherBadge(p) {
+  if (p.is_dome) {
+    return `<div style="margin-top:10px;font-size:11px;color:var(--text3);">🏟️ Dome — weather N/A</div>`;
+  }
+  if (p.temp_f == null && p.wind_speed_mph == null) return "";
+
+  const parts = [];
+  if (p.temp_f != null) parts.push(`🌡️ ${Math.round(p.temp_f)}°F`);
+
+  if (p.wind_speed_mph != null) {
+    const spd = Math.round(p.wind_speed_mph);
+    const wof = p.wind_out_factor;
+    let dir = "";
+    if (wof != null) {
+      if (wof > 0.3) dir = " OUT";
+      else if (wof < -0.3) dir = " IN";
+      else dir = " X-WIND";
+    }
+    const color = wof > 0.5 ? "#f87171" : wof < -0.5 ? "#60a5fa" : "var(--text2)";
+    parts.push(`<span style="color:${color}">💨 ${spd}mph${dir}</span>`);
+  }
+
+  if (p.precip_prob != null && p.precip_prob > 10) {
+    const color = p.precip_prob > 50 ? "#f87171" : "#fbbf24";
+    parts.push(`<span style="color:${color}">🌧️ ${Math.round(p.precip_prob)}% rain</span>`);
+  }
+
+  if (p.visibility_m != null && p.visibility_m < 5000) {
+    const vis_mi = (p.visibility_m / 1609).toFixed(1);
+    parts.push(`<span style="color:#f87171">🌫️ ${vis_mi}mi vis</span>`);
+  }
+
+  if (parts.length === 0) return "";
+  return `<div style="margin-top:10px;font-size:11px;color:var(--text2);display:flex;gap:10px;flex-wrap:wrap;">${parts.join("")}</div>`;
+}
+
 function cardHTML(p, i) {
   const winPct = pct(p.home_win_prob);
   const awayWinPct = (winPct === "—") ? "—" : Math.round((100 - Number(winPct)) * 10) / 10;
@@ -274,6 +310,8 @@ function cardHTML(p, i) {
         <div class="confidence-bar">
           <div class="confidence-fill" style="width:${barWidth}%"></div>
         </div>
+
+        ${weatherBadge(p)}
 
         <button onclick="explainGame(${i})" style="margin-top:12px;padding:6px 14px;font-size:12px;font-weight:600;background:transparent;border:1px solid var(--border2);color:var(--text2);border-radius:6px;cursor:pointer;transition:all .15s;"
           onmouseover="this.style.borderColor='var(--blue)';this.style.color='#93c5fd';this.style.background='var(--blue-dim)'"
