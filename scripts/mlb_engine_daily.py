@@ -329,6 +329,7 @@ def ensure_predictions_table() -> None:
         "rl_home_cover_prob":     "DOUBLE PRECISION",  # P(home margin > 1.5)
         "sigma_total_used":       "DOUBLE PRECISION",
         "sigma_rd_used":          "DOUBLE PRECISION",
+        "rd_home_win_prob":       "DOUBLE PRECISION",   # P(home wins) from run diff model
         # --- weather columns ---
         "temp_f":                 "DOUBLE PRECISION",
         "humidity_pct":           "DOUBLE PRECISION",
@@ -1304,6 +1305,12 @@ def build_pick_columns(df: pd.DataFrame, sigma_total: float, sigma_rd: float) ->
     df["ml_pick"] = [x[0] for x in ml_results]
     df["ml_edge"] = [x[1] for x in ml_results]
 
+    # Store the rd-derived win prob so the UI shows the same probability that
+    # drives the ML pick (instead of the separate calibrated win classifier).
+    df["rd_home_win_prob"] = df["run_diff_pred"].apply(
+        lambda rd: prob_over(float(rd), 0.0, sigma_rd) if pd.notna(rd) else None
+    )
+
     ou_results = df.apply(get_ou, axis=1)
     df["ou_pick"] = [x[0] for x in ou_results]
     df["p_over"]  = [x[1] for x in ou_results]
@@ -1422,6 +1429,7 @@ def upsert_predictions(pred_df: pd.DataFrame) -> None:
         "market_home_prob_novig","home_win_prob_raw",
         "ml_edge","p_over","ou_edge","rl_home_cover_prob",
         "sigma_total_used","sigma_rd_used","model_edge",
+        "rd_home_win_prob",
         # weather columns
         "temp_f","humidity_pct","precip_prob","precip_mm",
         "wind_speed_mph","wind_dir_deg","wind_out_factor",

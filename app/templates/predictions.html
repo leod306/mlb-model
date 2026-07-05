@@ -208,9 +208,12 @@ function weatherBadge(p) {
 }
 
 function cardHTML(p, i) {
-  const winPct = pct(p.home_win_prob);
+  // Use rd_home_win_prob (derived from run diff model) as the primary win %
+  // because that's what drives the ML pick. Fall back to calibrated win prob.
+  const rawWinProb = p.rd_home_win_prob != null ? p.rd_home_win_prob : p.home_win_prob;
+  const winPct = pct(rawWinProb);
   const awayWinPct = (winPct === "—") ? "—" : Math.round((100 - Number(winPct)) * 10) / 10;
-  const barWidth = typeof winPct === "number" ? Math.max(0, Math.min(100, winPct)) : 0;
+  const barWidth = rawWinProb != null ? Math.max(0, Math.min(100, rawWinProb * 100)) : 0;
 
   const hasMkt =
     p.market_home_prob != null ||

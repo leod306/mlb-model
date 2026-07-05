@@ -332,7 +332,7 @@ def api_predict_today(game_date: str = Query(..., description="YYYY-MM-DD")):
             p.play_rank, p.play_type, p.play_score, p.play_detail,
             p.market_home_prob, p.market_away_prob, p.market_total_line,
             p.market_home_ml, p.market_away_ml, p.best_home_ml, p.best_away_ml,
-            p.model_edge,
+            p.model_edge, p.rd_home_win_prob,
             p.temp_f, p.humidity_pct, p.precip_prob, p.precip_mm,
             p.wind_speed_mph, p.wind_dir_deg, p.wind_out_factor,
             p.visibility_m, p.cloud_cover_pct, p.weather_code, p.is_dome
@@ -390,6 +390,7 @@ def api_predict_today(game_date: str = Query(..., description="YYYY-MM-DD")):
             "best_home_ml":          safe_int(row.get("best_home_ml")),
             "best_away_ml":          safe_int(row.get("best_away_ml")),
             "model_edge":            safe_float(row.get("model_edge")),
+            "rd_home_win_prob":      safe_float(row.get("rd_home_win_prob")),
             # weather
             "temp_f":                safe_float(row.get("temp_f")),
             "humidity_pct":          safe_float(row.get("humidity_pct")),
