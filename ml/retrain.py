@@ -337,8 +337,10 @@ BASE_FEATURE_COLS = [
 
     # Weather — from game_weather table (backfilled via backfill_weather.py)
     # wind_out_factor: +ve = wind blowing out (inflates runs), -ve = blowing in
-    # Domes are set to wind_out_factor=0, temp=72, precip=0 before training.
-    "temp_f",
+    # Domes are set to wind_out_factor=0, precip=0 before training.
+    # NOTE: temp_f is intentionally excluded — it's a seasonal proxy (July is
+    # always hot) that causes the total model to over-predict runs in summer.
+    # Game-specific weather signals (wind direction, rain, visibility) are kept.
     "wind_out_factor",
     "precip_mm",
     "visibility_m",

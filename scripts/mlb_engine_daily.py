@@ -73,7 +73,7 @@ OU_ASSUMED_PRICE = int(os.getenv("OU_ASSUMED_PRICE", "-110"))   # breakeven .523
 # edges over the de-vigged market / breakeven price. 2.5-4% is a sane band:
 # lower and you're betting noise, higher and you'll almost never bet.
 MIN_ML_EDGE = float(os.getenv("MIN_ML_EDGE", "0.03"))    # model prob vs novig market prob
-MIN_OU_EDGE = float(os.getenv("MIN_OU_EDGE", "0.03"))    # P(side) vs breakeven at OU_ASSUMED_PRICE
+MIN_OU_EDGE = float(os.getenv("MIN_OU_EDGE", "0.07"))    # P(side) vs breakeven at OU_ASSUMED_PRICE
 
 # Run line thresholds. We do NOT have run line prices in market_odds, so these
 # picks are advisory only and never ranked in top plays. Typical prices:
