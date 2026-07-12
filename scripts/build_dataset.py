@@ -229,7 +229,9 @@ def add_market_features(games):
             games["market_total_line_feat"] = pd.NA
             return games
 
-        mo["official_date"] = pd.to_datetime(mo["official_date"])
+        mo["official_date"] = pd.to_datetime(mo["official_date"]).dt.normalize()
+        # Fix type mismatch: games["official_date"] comes from DB as object/string
+        games["official_date"] = pd.to_datetime(games["official_date"]).dt.normalize()
 
         def ml_to_prob(ml):
             try:

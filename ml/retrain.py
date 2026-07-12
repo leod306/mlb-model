@@ -48,7 +48,8 @@ DATA_PATH  = os.path.join(ML_DIR, "training_data.csv")
 
 # Market features are only included if at least this fraction of training
 # rows have real market data (avoids training on a constant default column).
-MARKET_COVERAGE_MIN = 0.40
+# 0.10 = 10% coverage threshold. We have ~13% novig prob, ~19% total line.
+MARKET_COVERAGE_MIN = 0.10
 
 # ---------------------------------------------------------------------------
 # 1. MLB Ballpark Run Factors (2024-25 average, 100 = league average)
@@ -157,27 +158,34 @@ def add_market_features(df: pd.DataFrame) -> pd.DataFrame:
       market_home_prob_novig — vig-removed home win probability
       market_total_line      — already in CSV if odds were joined at build time
 
-    De-vig by normalizing the two implied probabilities so they sum to 1.
-    Priority: use market_home_prob/market_away_prob columns if present,
-    otherwise derive from market_home_ml/market_away_ml.
+    Priority: if market_home_prob_novig is already in the dataframe (computed
+    by build_dataset.py's market join), keep it as-is and don't overwrite.
+    Otherwise de-vig from market_home_prob/away_prob or moneylines.
     """
     df = df.copy()
 
-    hp = pd.to_numeric(df.get("market_home_prob"), errors="coerce") \
-        if "market_home_prob" in df.columns else pd.Series(np.nan, index=df.index)
-    ap = pd.to_numeric(df.get("market_away_prob"), errors="coerce") \
-        if "market_away_prob" in df.columns else pd.Series(np.nan, index=df.index)
+    # If build_dataset already computed market_home_prob_novig, preserve it.
+    existing = pd.to_numeric(df.get("market_home_prob_novig"), errors="coerce") \
+        if "market_home_prob_novig" in df.columns else None
 
-    # fall back to moneylines where prob columns are missing
-    if "market_home_ml" in df.columns:
-        hp_ml = df["market_home_ml"].map(american_to_prob)
-        ap_ml = df["market_away_ml"].map(american_to_prob) if "market_away_ml" in df.columns else np.nan
-        hp = hp.fillna(pd.to_numeric(hp_ml, errors="coerce"))
-        ap = ap.fillna(pd.to_numeric(ap_ml, errors="coerce"))
+    if existing is not None and existing.notna().any():
+        df["market_home_prob_novig"] = existing
+    else:
+        # Re-derive from raw prob or moneyline columns
+        hp = pd.to_numeric(df.get("market_home_prob"), errors="coerce") \
+            if "market_home_prob" in df.columns else pd.Series(np.nan, index=df.index)
+        ap = pd.to_numeric(df.get("market_away_prob"), errors="coerce") \
+            if "market_away_prob" in df.columns else pd.Series(np.nan, index=df.index)
 
-    denom = hp + ap
-    novig = np.where((denom > 0) & hp.notna() & ap.notna(), hp / denom, np.nan)
-    df["market_home_prob_novig"] = novig
+        if "market_home_ml" in df.columns:
+            hp_ml = df["market_home_ml"].map(american_to_prob)
+            ap_ml = df["market_away_ml"].map(american_to_prob) if "market_away_ml" in df.columns else np.nan
+            hp = hp.fillna(pd.to_numeric(hp_ml, errors="coerce"))
+            ap = ap.fillna(pd.to_numeric(ap_ml, errors="coerce"))
+
+        denom = hp + ap
+        novig = np.where((denom > 0) & hp.notna() & ap.notna(), hp / denom, np.nan)
+        df["market_home_prob_novig"] = novig
 
     if "market_total_line" in df.columns:
         df["market_total_line"] = pd.to_numeric(df["market_total_line"], errors="coerce")
@@ -338,9 +346,8 @@ BASE_FEATURE_COLS = [
     # Weather — from game_weather table (backfilled via backfill_weather.py)
     # wind_out_factor: +ve = wind blowing out (inflates runs), -ve = blowing in
     # Domes are set to wind_out_factor=0, precip=0 before training.
-    # NOTE: temp_f is intentionally excluded — it's a seasonal proxy (July is
-    # always hot) that causes the total model to over-predict runs in summer.
-    # Game-specific weather signals (wind direction, rain, visibility) are kept.
+    # temp_f intentionally excluded: seasonal proxy (July always hot) causes
+    # the total model to over-predict runs in summer → systematic OVER bias.
     "wind_out_factor",
     "precip_mm",
     "visibility_m",
