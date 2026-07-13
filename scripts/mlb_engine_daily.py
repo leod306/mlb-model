@@ -1274,14 +1274,9 @@ def build_pick_columns(df: pd.DataFrame, sigma_total: float, sigma_rd: float) ->
         if rd_pred is None:
             return "PASS", None
 
-        # market favorite by de-vigged prob; fall back to model if odds missing
-        if m_home is not None:
-            fav_is_home = m_home >= 0.5
-        else:
-            p_home = coerce_float(r.get("home_win_prob"))
-            if p_home is None:
-                return "PASS", None
-            fav_is_home = p_home >= 0.5
+        # Use MODEL run diff to determine direction — this guarantees RL and ML
+        # always agree on which team is expected to win.
+        fav_is_home = rd_pred >= 0
 
         p_home_covers_15 = prob_home_covers(rd_pred, 1.5, sigma_rd)   # home wins by 2+
         p_away_covers_15 = 1.0 - normal_cdf(-1.5, mu=-rd_pred, sigma=sigma_rd)  # away wins by 2+
