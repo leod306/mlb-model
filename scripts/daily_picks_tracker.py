@@ -404,18 +404,11 @@ def save_today_picks(cur):
             pred_run_diff, pred_total_runs, market_total_line,
             home_ml_implied, away_ml_implied
         ) VALUES %s
-        ON CONFLICT (game_pk, pick_date) DO UPDATE SET
-            ml_pick           = EXCLUDED.ml_pick,
-            runline_pick      = EXCLUDED.runline_pick,
-            ou_pick           = EXCLUDED.ou_pick,
-            home_win_prob     = EXCLUDED.home_win_prob,
-            away_win_prob     = EXCLUDED.away_win_prob,
-            pred_run_diff     = EXCLUDED.pred_run_diff,
-            pred_total_runs   = EXCLUDED.pred_total_runs,
-            market_total_line = EXCLUDED.market_total_line,
-            home_ml_implied   = EXCLUDED.home_ml_implied,
-            away_ml_implied   = EXCLUDED.away_ml_implied;
+        ON CONFLICT (game_pk, pick_date) DO NOTHING;
     """, data)
+    # DO NOTHING: first write wins. Re-running the tracker later in the day
+    # (after official lineups / odds update) will NOT overwrite the morning picks.
+    # To reset a day: DELETE FROM daily_picks WHERE pick_date = 'YYYY-MM-DD';
 
     print(f"\n  ✅ Saved {len(data)} picks for {today}\n")
 
