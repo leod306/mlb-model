@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 import os
 from scipy.stats import poisson as _poisson
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -452,6 +452,55 @@ def load_games_for_date(target_date: date) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def load_batter_game_log_df(days: int = 21) -> pd.DataFrame:
+    """
+    Load last N days of batter game logs for recent form calculation.
+    Returns DataFrame with player_id, official_date, hits, pa, home_runs,
+    rbi, runs, walks, stolen_bases, total_bases, strikeouts.
+    """
+    if not table_exists("batter_game_log"):
+        return pd.DataFrame()
+    try:
+        df = pd.read_sql(text("""
+            SELECT player_id, player_name, official_date,
+                   hits, ab, pa, home_runs, rbi, runs,
+                   walks, stolen_bases, total_bases, strikeouts
+            FROM batter_game_log
+            WHERE official_date >= CURRENT_DATE - :days * INTERVAL '1 day'
+              AND pa > 0
+            ORDER BY player_id, official_date DESC
+        """), engine, params={"days": days})
+        log(f"  Batter game log: {len(df)} rows ({df['player_id'].nunique() if not df.empty else 0} players, last {days}d)")
+        return df
+    except Exception as e:
+        log(f"  batter_game_log load failed: {e}")
+        return pd.DataFrame()
+
+
+def load_statcast_df() -> pd.DataFrame:
+    """
+    Load Statcast xwOBA/xBA/xSLG/barrel/exit-velo from statcast_batting table.
+    Returns DataFrame keyed on player_id.
+    """
+    if not table_exists("statcast_batting"):
+        return pd.DataFrame()
+    try:
+        df = pd.read_sql(text("""
+            SELECT player_id, player_name, pa,
+                   ba, xba, xba_diff,
+                   slg, xslg,
+                   woba, xwoba, xwoba_diff,
+                   barrel_pct, avg_exit_velo, hard_hit_pct, sweet_spot_pct
+            FROM statcast_batting
+            WHERE season = :s AND pa >= 25
+        """), engine, params={"s": MLB_SEASON})
+        log(f"  Statcast batting: {len(df)} players")
+        return df
+    except Exception as e:
+        log(f"  statcast_batting load failed: {e}")
+        return pd.DataFrame()
+
+
 def load_park_factors(game_pks: List[int]) -> Dict[int, tuple]:
     """
     Load park_run_factor and park_hr_factor from game_features for today's games.
@@ -574,6 +623,157 @@ def get_opposing_pitcher_factor(
 
     factor = LEAGUE_ERA / adj_era
     return round(min(max(factor, 0.70), 1.35), 4)
+
+
+def get_recent_form_factor(
+    player_id: Optional[int],
+    bgl_df: pd.DataFrame,
+    season_df: pd.DataFrame,
+    prop_type: str,
+) -> float:
+    """
+    Compare player's last 14 days performance to their season rate.
+    Returns a multiplier capped at [0.80, 1.20].
+
+    Needs at least 4 games / 12 PA in the window to apply any adjustment.
+    Regresses toward 1.0 based on sample size — max 65% weight on recent data
+    even with a full 14-day window, so we don't overfit to short hot streaks.
+
+    Stat used per prop type:
+      hits / tb / hrr      → hits/PA  (AVG proxy)
+      home_runs            → HR/PA
+      walks                → BB/PA
+      rbis                 → RBI/PA
+      runs_scored          → R/PA
+      stolen_bases         → SB/PA
+      hits_runs_rbis       → (H+R+RBI)/PA
+    """
+    if player_id is None or bgl_df.empty:
+        return 1.0
+
+    cutoff = pd.Timestamp(date.today() - timedelta(days=14))
+    recent = bgl_df[
+        (bgl_df["player_id"] == player_id) &
+        (pd.to_datetime(bgl_df["official_date"]) >= cutoff)
+    ]
+
+    if recent.empty:
+        return 1.0
+
+    n_games  = len(recent)
+    total_pa = int(recent["pa"].sum())
+    if n_games < 4 or total_pa < 12:
+        return 1.0
+
+    # Stat mapping: prop_type → (numerator_cols, denominator_col)
+    stat_map = {
+        "batter_hits":          (["hits"],                  "pa"),
+        "batter_total_bases":   (["total_bases"],           "ab"),
+        "batter_home_runs":     (["home_runs"],              "pa"),
+        "batter_walks":         (["walks"],                  "pa"),
+        "batter_rbis":          (["rbi"],                    "pa"),
+        "batter_runs_scored":   (["runs"],                   "pa"),
+        "batter_stolen_bases":  (["stolen_bases"],           "pa"),
+        "batter_hits_runs_rbis":(["hits", "runs", "rbi"],   "pa"),
+    }
+    if prop_type not in stat_map:
+        return 1.0
+
+    num_cols, denom_col = stat_map[prop_type]
+    recent_num   = sum(int(recent[c].sum()) for c in num_cols if c in recent.columns)
+    recent_denom = int(recent[denom_col].sum()) if denom_col in recent.columns else total_pa
+    if recent_denom <= 0:
+        return 1.0
+    recent_rate = recent_num / recent_denom
+
+    # Season rate from season_df (need player_id lookup)
+    season_rate = None
+    if not season_df.empty and "player_id" in season_df.columns:
+        row = season_df[season_df["player_id"] == player_id]
+        if not row.empty:
+            r = row.iloc[0]
+            sp = _safe_float(r.get("pa")) or 0
+            if sp > 0:
+                if prop_type == "batter_hits":
+                    season_rate = (_safe_float(r.get("avg")) or 0) * 1.0  # avg = H/AB; close enough
+                elif prop_type == "batter_total_bases":
+                    season_rate = _safe_float(r.get("slg")) or 0
+                elif prop_type == "batter_home_runs":
+                    season_rate = (_safe_float(r.get("home_runs")) or 0) / sp
+                elif prop_type == "batter_walks":
+                    season_rate = (_safe_float(r.get("walks")) or 0) / sp
+                elif prop_type == "batter_rbis":
+                    season_rate = (_safe_float(r.get("rbi")) or 0) / sp
+                elif prop_type == "batter_runs_scored":
+                    season_rate = (_safe_float(r.get("runs")) or 0) / sp
+                elif prop_type == "batter_stolen_bases":
+                    season_rate = (_safe_float(r.get("stolen_bases")) or 0) / sp
+                elif prop_type == "batter_hits_runs_rbis":
+                    h  = (_safe_float(r.get("hits")) or 0) if "hits" in r.index else 0
+                    ri = (_safe_float(r.get("rbi")) or 0)
+                    ru = (_safe_float(r.get("runs")) or 0)
+                    season_rate = (h + ri + ru) / sp
+
+    if season_rate is None or season_rate <= 0.001:
+        return 1.0
+
+    raw_ratio = recent_rate / season_rate
+    # Regress toward 1.0: weight scales with PA, maxing at 0.65 (always 35% toward mean)
+    weight = min(total_pa / 60.0, 0.65)
+    factor = weight * raw_ratio + (1.0 - weight) * 1.0
+    return round(min(max(factor, 0.80), 1.20), 4)
+
+
+def get_contact_quality_factor(
+    player_id: Optional[int],
+    statcast_df: pd.DataFrame,
+    prop_type: str,
+) -> float:
+    """
+    Adjust batter projections based on xwOBA vs actual wOBA (luck correction).
+    xwOBA > wOBA  →  batter is unlucky → proj gets a boost
+    xwOBA < wOBA  →  batter is lucky   → proj is suppressed
+    HR props additionally use barrel% as a secondary signal.
+    Capped at [0.88, 1.12] — smaller than form factor, this is a soft signal.
+    """
+    if player_id is None or statcast_df.empty:
+        return 1.0
+
+    row = statcast_df[statcast_df["player_id"] == player_id]
+    if row.empty:
+        return 1.0
+    r = row.iloc[0]
+
+    # Primary: xwOBA - wOBA divergence
+    xwoba_diff = _safe_float(r.get("xwoba_diff"))  # positive = unlucky = boost
+    woba       = _safe_float(r.get("woba"))
+
+    factor = 1.0
+
+    if xwoba_diff is not None and woba is not None and woba > 0.1:
+        # Scale: a 0.030 xwOBA diff (big) → ~9% factor adjustment
+        # (0.030 / 0.330 league avg wOBA) ≈ 9%
+        pct_diff = xwoba_diff / woba
+        # Regress 50% toward zero (xwOBA itself has noise)
+        factor = 1.0 + (pct_diff * 0.5)
+
+    # For HR props, also blend in barrel% signal
+    if prop_type == "batter_home_runs":
+        barrel = _safe_float(r.get("barrel_pct"))
+        LEAGUE_BARREL = 7.5  # ~7.5% league average barrel rate
+        if barrel is not None:
+            barrel_factor = 1.0 + ((barrel - LEAGUE_BARREL) / LEAGUE_BARREL) * 0.3
+            factor = (factor + barrel_factor) / 2.0  # average the two signals
+
+    # For total bases, blend in xSLG signal
+    elif prop_type == "batter_total_bases":
+        xslg = _safe_float(r.get("xslg"))
+        slg  = _safe_float(r.get("slg"))
+        if xslg is not None and slg is not None and slg > 0.1:
+            slg_factor = 1.0 + ((xslg - slg) / slg) * 0.4
+            factor = (factor + slg_factor) / 2.0
+
+    return round(min(max(factor, 0.88), 1.12), 4)
 
 
 # =============================================================================
@@ -925,7 +1125,9 @@ def score_prop(raw: Dict, lineups_df: pd.DataFrame, bvp_df: pd.DataFrame,
                game_pk: Optional[int], career_df: pd.DataFrame = None,
                season_df: pd.DataFrame = None,
                season_pitch_df: pd.DataFrame = None,
-               park_factors: Dict[int, tuple] = None) -> Optional[Dict]:
+               park_factors: Dict[int, tuple] = None,
+               bgl_df: pd.DataFrame = None,
+               statcast_df: pd.DataFrame = None) -> Optional[Dict]:
     """
     Compare book line to projection. Return scored prop dict or None.
     """
@@ -1010,7 +1212,18 @@ def score_prop(raw: Dict, lineups_df: pd.DataFrame, bvp_df: pd.DataFrame,
         run_pf, hr_pf = (park_factors or {}).get(game_pk, (1.0, 1.0)) if game_pk else (1.0, 1.0)
         park_factor = hr_pf if prop_type == "batter_home_runs" else run_pf
 
-        proj = proj * pa_factor * pitcher_factor * park_factor
+        # 4. Recent form factor (last 14 days vs season rate)
+        pid = _get_player_id(player, lineups_df, sd)
+        form_factor = get_recent_form_factor(
+            pid, bgl_df if bgl_df is not None else pd.DataFrame(), sd, prop_type
+        )
+
+        # 5. Contact quality factor (xwOBA/xSLG/barrel vs actual — luck correction)
+        contact_factor = get_contact_quality_factor(
+            pid, statcast_df if statcast_df is not None else pd.DataFrame(), prop_type
+        )
+
+        proj = proj * pa_factor * pitcher_factor * park_factor * form_factor * contact_factor
 
     # Convert projection (Poisson mean) → P(stat > line)
     # For half-integer lines (0.5, 1.5, 2.5), P(X > line) = P(X >= floor(line)+1)
@@ -1145,10 +1358,17 @@ def main() -> None:
     game_pk_list = games_df["game_pk"].tolist() if not games_df.empty else []
     park_factors = load_park_factors(game_pk_list)
 
+    # Load batter game logs (recent form — last 21 days)
+    bgl_df = load_batter_game_log_df(days=21)
+
+    # Load Statcast batting quality metrics (xwOBA, barrel%, exit velo)
+    statcast_df = load_statcast_df()
+
     log(f"Games: {len(games_df)}  Lineups: {len(lineups_df)}  "
         f"BvP rows: {len(bvp_df)}  Career rows: {len(career_df)}  "
         f"Season batters: {len(season_df)}  Season pitchers: {len(season_pitch_df)}  "
-        f"Park factors: {len(park_factors)}")
+        f"Park factors: {len(park_factors)}  "
+        f"Game-log rows: {len(bgl_df)}  Statcast players: {len(statcast_df)}")
 
     # Normalize player names in lineups
     if not lineups_df.empty:
@@ -1202,7 +1422,8 @@ def main() -> None:
         for raw in raw_props:
             scored = score_prop(
                 raw, lineups_df, bvp_df, pgl_df, probables_df, game_pk,
-                career_df, season_df, season_pitch_df, park_factors
+                career_df, season_df, season_pitch_df, park_factors,
+                bgl_df, statcast_df
             )
             if scored and scored["pick"] != "PASS":
                 all_scored.append(scored)

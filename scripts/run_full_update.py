@@ -21,6 +21,8 @@ Run order:
  7b. Load Weather           — game-time temp/wind/rain from Open-Meteo (free)
   8. Run MLB Engine         — generates predictions using all of the above
   9. Daily Picks Tracker    — evaluates yesterday + saves today's picks
+ 3b. Load Statcast Batting  — xwOBA/barrel%/exit velo from Baseball Savant
+  6b. Load Batter Game Logs — last 21d per-game hitting for hot/cold factor
  10. Load Player Props      — fetches hits/TB/HR/K/BB edges from Odds API
  11. Grade Player Props     — writes WIN/LOSS/PUSH to player_props table
 
@@ -97,6 +99,14 @@ def main():
     t = run_step("Load Pitcher Game Logs", "load_pitcher_game_log.py")
     timings.append(("Load Pitcher Game Logs", t))
 
+    # ── 3b. Statcast Batting (xwOBA / barrel% / exit velo) ──────────────────
+    # Pulls season Statcast metrics from Baseball Savant via pybaseball.
+    # Feeds contact quality factor in load_player_props.py.
+    # Non-critical and slow on first run; safe to skip if pybaseball absent.
+    # Runs every day but data changes slowly — DB upsert is idempotent.
+    t = run_step("Load Statcast Batting",  "load_statcast_batting.py", required=False)
+    timings.append(("Load Statcast Batting", t))
+
     # ── 4. Team Features (as-of-date FIP / bullpen FIP / offense / park) ──────
     # Runs backfill_pitching_offense.py for TODAY's slate only. Computes
     # everything from our own pitcher_game_log + games — no FanGraphs/BBRef,
@@ -118,6 +128,13 @@ def main():
     # Overwrites RotoWire rows when official lineups are confirmed (~3-4pm)
     t = run_step("Load Official Lineups",  "load_lineups.py",          required=False)
     timings.append(("Load Official Lineups", t))
+
+    # ── 6b. Batter Game Logs ─────────────────────────────────────────────────
+    # Fetches last 21 days of per-game hitting stats for today's lineup players.
+    # Feeds recent form factor (hot/cold streak) in load_player_props.py.
+    # Non-critical: props work without it, just without form adjustment.
+    t = run_step("Load Batter Game Logs",  "load_batter_game_log.py",  required=False)
+    timings.append(("Load Batter Game Logs", t))
 
     # ── 7. Odds ──────────────────────────────────────────────────────────────
     # Must run BEFORE engine so market lines feed into pick logic
