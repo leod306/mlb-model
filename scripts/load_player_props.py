@@ -72,10 +72,11 @@ MAX_EDGE = 0.25
 MIN_BOOKS_EACH_SIDE = 1
 
 # League average fallbacks
-LEAGUE_AVG   = 0.255
-LEAGUE_OBP   = 0.320
-LEAGUE_SLG   = 0.415
+LEAGUE_AVG     = 0.255
+LEAGUE_OBP     = 0.320
+LEAGUE_SLG     = 0.415
 LEAGUE_K_PER_9 = 8.5
+LEAGUE_ERA     = 4.20   # used for pitcher quality factor
 
 
 def log(msg: str) -> None:
@@ -451,6 +452,130 @@ def load_games_for_date(target_date: date) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def load_park_factors(game_pks: List[int]) -> Dict[int, tuple]:
+    """
+    Load park_run_factor and park_hr_factor from game_features for today's games.
+    Returns dict: game_pk → (run_factor, hr_factor).
+    Defaults to (1.0, 1.0) when not found.
+    """
+    if not game_pks or not table_exists("game_features"):
+        return {}
+    try:
+        rows = pd.read_sql(
+            text("SELECT game_pk, park_run_factor, park_hr_factor FROM game_features WHERE game_pk = ANY(:pks)"),
+            engine, params={"pks": game_pks}
+        )
+        result = {}
+        for _, r in rows.iterrows():
+            rf = _safe_float(r.get("park_run_factor")) or 1.0
+            hf = _safe_float(r.get("park_hr_factor")) or 1.0
+            result[int(r["game_pk"])] = (rf, hf)
+        return result
+    except Exception:
+        return {}
+
+
+# =============================================================================
+# CONTEXT ADJUSTMENTS  (pitcher quality, park factor, lineup PA)
+# =============================================================================
+
+def get_pa_estimate(player_name: str, lineups_df: pd.DataFrame) -> float:
+    """
+    Estimate PA per game based on batting order.
+    Leadoff (1) → 4.30 PA, cleanup (4) → 4.11 PA, 9-hole → 3.75 PA.
+    Returns 4.0 if batting order unknown.
+    """
+    if lineups_df.empty:
+        return 4.0
+    name_key = player_name.strip().lower()
+    match = lineups_df[lineups_df["player_name"].str.lower().str.strip() == name_key]
+    if match.empty:
+        return 4.0
+    order = match.iloc[0].get("batting_order")
+    if order is None or (isinstance(order, float) and math.isnan(order)):
+        return 4.0
+    try:
+        order = int(order)
+    except (ValueError, TypeError):
+        return 4.0
+    # Linear interpolation: order 1 → 4.30, order 9 → 3.75 (Δ = 0.069/slot)
+    pa = 4.30 - (order - 1) * 0.069
+    return round(max(3.70, min(4.35, pa)), 3)
+
+
+def get_opposing_pitcher_factor(
+    player_name: str,
+    game_pk: Optional[int],
+    lineups_df: pd.DataFrame,
+    probables_df: pd.DataFrame,
+    pgl_df: pd.DataFrame,
+    season_pitch_df: pd.DataFrame,
+) -> float:
+    """
+    Returns a multiplier for batter projections based on opposing SP quality.
+    League-average pitcher (ERA 4.20) → 1.0.
+    Elite pitcher (ERA 2.8, e.g. Snell/Cole) → ~0.79 (suppress ~21%).
+    Weak pitcher (ERA 5.8) → ~1.26 (boost ~26%).
+    Capped at [0.70, 1.35] to avoid blowing up props on small samples.
+    """
+    if game_pk is None or probables_df.empty:
+        return 1.0
+
+    # 1. Determine batter side (home vs away)
+    side = None
+    if not lineups_df.empty:
+        name_key = player_name.strip().lower()
+        match = lineups_df[lineups_df["player_name"].str.lower().str.strip() == name_key]
+        if not match.empty:
+            side = match.iloc[0].get("side")
+
+    if side is None:
+        return 1.0
+
+    # 2. Look up opposing SP name from probables
+    prob_row = probables_df[probables_df["game_pk"] == game_pk]
+    if prob_row.empty:
+        return 1.0
+    prob_row = prob_row.iloc[0]
+    opp_sp = prob_row.get("away_sp_name") if side == "home" else prob_row.get("home_sp_name")
+    if not opp_sp or (isinstance(opp_sp, float) and math.isnan(opp_sp)):
+        return 1.0
+
+    opp_key = str(opp_sp).strip().lower()
+
+    # 3. Compute opposing pitcher ERA from recent game log (last 5 starts)
+    pitcher_era = None
+    n_starts = 0
+    if not pgl_df.empty:
+        recent = pgl_df[pgl_df["pitcher_name_key"] == opp_key].head(5)
+        if not recent.empty:
+            total_ip = _safe_float(recent["innings_pitched"].sum()) or 0
+            total_er = _safe_float(recent["er_allowed"].sum()) or 0
+            n_starts = len(recent)
+            if total_ip >= 3.0:
+                pitcher_era = (total_er / total_ip) * 9.0
+
+    # 4. Fallback: use K/9 from season stats as a rough proxy
+    if pitcher_era is None and not season_pitch_df.empty:
+        match = season_pitch_df[season_pitch_df["pitcher_name"] == opp_key]
+        if not match.empty:
+            k9 = _safe_float(match.iloc[0].get("k_per_9")) or LEAGUE_K_PER_9
+            # K/9 of 8.5 (league avg) → factor 1.0; 11 → 0.77; 6 → 1.18
+            factor = LEAGUE_K_PER_9 / max(k9, 1.0)
+            return round(min(max(factor, 0.70), 1.35), 4)
+
+    if pitcher_era is None:
+        return 1.0
+
+    # 5. Regress to league average (small sample correction)
+    weight = min(n_starts / 5.0, 1.0)
+    adj_era = weight * pitcher_era + (1.0 - weight) * LEAGUE_ERA
+    adj_era = max(adj_era, 1.0)  # guard divide-by-zero on shutout stretches
+
+    factor = LEAGUE_ERA / adj_era
+    return round(min(max(factor, 0.70), 1.35), 4)
+
+
 # =============================================================================
 # PROJECTION ENGINE
 # =============================================================================
@@ -799,7 +924,8 @@ def score_prop(raw: Dict, lineups_df: pd.DataFrame, bvp_df: pd.DataFrame,
                pgl_df: pd.DataFrame, probables_df: pd.DataFrame,
                game_pk: Optional[int], career_df: pd.DataFrame = None,
                season_df: pd.DataFrame = None,
-               season_pitch_df: pd.DataFrame = None) -> Optional[Dict]:
+               season_pitch_df: pd.DataFrame = None,
+               park_factors: Dict[int, tuple] = None) -> Optional[Dict]:
     """
     Compare book line to projection. Return scored prop dict or None.
     """
@@ -868,6 +994,23 @@ def score_prop(raw: Dict, lineups_df: pd.DataFrame, bvp_df: pd.DataFrame,
 
     if proj is None:
         return None
+
+    # ── Context adjustments (batter props only) ───────────────────────────────
+    if prop_type.startswith("batter_"):
+        # 1. Lineup position → better PA estimate (was flat 4.0 for everyone)
+        pa_adj    = get_pa_estimate(player, lineups_df)
+        pa_factor = pa_adj / 4.0   # e.g. leadoff 4.30/4.0 = 1.075, 9-hole 3.75/4.0 = 0.938
+
+        # 2. Opposing pitcher quality (ERA vs league avg → suppress/boost)
+        pitcher_factor = get_opposing_pitcher_factor(
+            player, game_pk, lineups_df, probables_df, pgl_df, spd
+        )
+
+        # 3. Park factor (run or HR depending on prop type)
+        run_pf, hr_pf = (park_factors or {}).get(game_pk, (1.0, 1.0)) if game_pk else (1.0, 1.0)
+        park_factor = hr_pf if prop_type == "batter_home_runs" else run_pf
+
+        proj = proj * pa_factor * pitcher_factor * park_factor
 
     # Convert projection (Poisson mean) → P(stat > line)
     # For half-integer lines (0.5, 1.5, 2.5), P(X > line) = P(X >= floor(line)+1)
@@ -998,9 +1141,14 @@ def main() -> None:
     season_df     = load_season_batting_stats()
     season_pitch_df = load_season_pitching_stats()
 
+    # Load park factors for today's games
+    game_pk_list = games_df["game_pk"].tolist() if not games_df.empty else []
+    park_factors = load_park_factors(game_pk_list)
+
     log(f"Games: {len(games_df)}  Lineups: {len(lineups_df)}  "
         f"BvP rows: {len(bvp_df)}  Career rows: {len(career_df)}  "
-        f"Season batters: {len(season_df)}  Season pitchers: {len(season_pitch_df)}")
+        f"Season batters: {len(season_df)}  Season pitchers: {len(season_pitch_df)}  "
+        f"Park factors: {len(park_factors)}")
 
     # Normalize player names in lineups
     if not lineups_df.empty:
@@ -1054,7 +1202,7 @@ def main() -> None:
         for raw in raw_props:
             scored = score_prop(
                 raw, lineups_df, bvp_df, pgl_df, probables_df, game_pk,
-                career_df, season_df, season_pitch_df
+                career_df, season_df, season_pitch_df, park_factors
             )
             if scored and scored["pick"] != "PASS":
                 all_scored.append(scored)

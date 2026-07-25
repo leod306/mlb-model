@@ -407,10 +407,17 @@ def save_today_picks(cur):
         ON CONFLICT (game_pk, pick_date) DO NOTHING;
     """, data)
     # DO NOTHING: first write wins. Re-running the tracker later in the day
-    # (after official lineups / odds update) will NOT overwrite the morning picks.
+    # will NOT overwrite morning picks.
     # To reset a day: DELETE FROM daily_picks WHERE pick_date = 'YYYY-MM-DD';
 
-    print(f"\n  ✅ Saved {len(data)} picks for {today}\n")
+    # Check how many actually landed (DO NOTHING means some may have been skipped)
+    cur.execute(f"SELECT COUNT(*) FROM {PICKS_TABLE} WHERE pick_date = %s", (today,))
+    saved = cur.fetchone()[0]
+    skipped = len(data) - saved if saved < len(data) else 0
+    if skipped:
+        print(f"\n  ⚠️  {saved}/{len(data)} picks saved for {today} ({skipped} already existed — locked)\n")
+    else:
+        print(f"\n  ✅ Saved {saved} picks for {today}\n")
 
 
 # ---------------------------------------------------------------------------

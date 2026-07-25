@@ -46,6 +46,7 @@ from app.db import engine
 STADIUMS: dict[str, dict] = {
     # team abbrev → {lat, lon, orientation_deg, name}
     "ARI": {"lat": 33.4453, "lon": -112.0667, "orientation_deg": 345, "name": "Chase Field"},
+    "AZ":  {"lat": 33.4453, "lon": -112.0667, "orientation_deg": 345, "name": "Chase Field"},
     "ATL": {"lat": 33.8908, "lon": -84.4678,  "orientation_deg":  60, "name": "Truist Park"},
     "BAL": {"lat": 39.2838, "lon": -76.6218,  "orientation_deg": 100, "name": "Oriole Park"},
     "BOS": {"lat": 42.3467, "lon": -71.0972,  "orientation_deg":  96, "name": "Fenway Park"},

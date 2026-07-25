@@ -1439,10 +1439,11 @@ def upsert_predictions(pred_df: pd.DataFrame) -> None:
     sql = f"""
     INSERT INTO {PREDICTIONS_TABLE} ({col_str}, updated_at)
     VALUES ({val_str}, NOW())
-    ON CONFLICT (game_pk) DO UPDATE SET
-        {update_str},
-        updated_at = NOW()
+    ON CONFLICT (game_pk) DO NOTHING
     """
+    # DO NOTHING: first morning run is authoritative. Re-running the engine
+    # later in the day (after lineups/odds update) will NOT overwrite picks.
+    # To force a fresh run, manually DELETE FROM predictions WHERE official_date = 'YYYY-MM-DD'.
 
     def clean_record(rec):
         out = {}
@@ -1460,9 +1461,15 @@ def upsert_predictions(pred_df: pd.DataFrame) -> None:
 
     records = [clean_record(r) for r in pred_df[cols].to_dict(orient="records")]
     with engine.begin() as conn:
-        conn.execute(text(sql), records)
+        result = conn.execute(text(sql), records)
+        inserted = result.rowcount if result.rowcount >= 0 else len(records)
+        skipped  = len(records) - inserted
 
-    log(f"Saved {len(pred_df)} predictions into {PREDICTIONS_TABLE}")
+    if skipped > 0:
+        log(f"Saved {inserted} new predictions into {PREDICTIONS_TABLE} "
+            f"({skipped} already existed — locked, not overwritten)")
+    else:
+        log(f"Saved {inserted} predictions into {PREDICTIONS_TABLE}")
 
 
 # =============================================================================
