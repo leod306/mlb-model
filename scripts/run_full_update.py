@@ -22,6 +22,7 @@ Run order:
   8. Run MLB Engine         — generates predictions using all of the above
   9. Daily Picks Tracker    — evaluates yesterday + saves today's picks
  10. Load Player Props      — fetches hits/TB/HR/K/BB edges from Odds API
+ 11. Grade Player Props     — writes WIN/LOSS/PUSH to player_props table
 
 NOTE on Build Team Features (step 4):
   - Now runs backfill_pitching_offense.py for today's slate only.
@@ -144,6 +145,12 @@ def main():
     # Depends on: lineups (step 6), pitcher game logs (step 4)
     t = run_step("Load Player Props",      "load_player_props.py",     required=False)
     timings.append(("Load Player Props", t))
+
+    # ── 11. Grade Yesterday's Props ──────────────────────────────────────────
+    # Fetches actual boxscore stats from MLB Stats API and writes
+    # WIN / LOSS / PUSH back to player_props. Populates prop results page.
+    t = run_step("Grade Player Props",     "grade_player_props.py",    required=False)
+    timings.append(("Grade Player Props", t))
 
     # ── Summary ──────────────────────────────────────────────────────────────
     total = time.time() - total_start
