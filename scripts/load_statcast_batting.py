@@ -206,8 +206,15 @@ def build_rows(exp_df, ev_df, year: int) -> list[dict]:
     base = None
 
     if exp_df is not None and not exp_df.empty:
+        # pybaseball may return "last_name, first_name" as a single combined column
+        # e.g. "Trout, Mike" → split to first_name="Mike", last_name="Trout"
+        if "last_name, first_name" in exp_df.columns:
+            split = exp_df["last_name, first_name"].str.split(", ", n=1, expand=True)
+            exp_df = exp_df.copy()
+            exp_df["last_name"]  = split[0].str.strip()
+            exp_df["first_name"] = split[1].str.strip() if split.shape[1] > 1 else ""
         exp_clean = _rename(exp_df, EXP_COL_MAP)
-        # Build player_name from first/last if present
+        # Build player_name: "First Last"
         if "first_name" in exp_clean.columns and "last_name" in exp_clean.columns:
             exp_clean["player_name"] = (exp_clean["first_name"].fillna("").astype(str).str.strip()
                                         + " "
