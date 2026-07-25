@@ -63,13 +63,13 @@ PROP_MARKETS = [
 # Bookmakers to average across
 BOOKMAKERS = "draftkings,fanduel,betmgm,betonlineag,betrivers"
 
-# Minimum edge to flag as a play — 8% keeps ~10-15% of props as edges
-MIN_EDGE = 0.08
+# Minimum edge to flag as a play — 12% targets ~10-15% of props as edges
+MIN_EDGE = 0.12
 # Maximum plausible edge — anything above this is likely a data artifact
 MAX_EDGE = 0.25
-# Minimum books required on each side to trust the line
-# 1 allows niche markets (HR, walks, stolen bases) that fewer books post
-MIN_BOOKS_EACH_SIDE = 1
+# Minimum books required on each side for a reliable consensus price
+# 2 filters single-book outliers while still allowing niche markets
+MIN_BOOKS_EACH_SIDE = 2
 
 # League average fallbacks
 LEAGUE_AVG     = 0.255
@@ -662,7 +662,7 @@ def get_recent_form_factor(
 
     n_games  = len(recent)
     total_pa = int(recent["pa"].sum())
-    if n_games < 4 or total_pa < 12:
+    if n_games < 5 or total_pa < 25:
         return 1.0
 
     # Stat mapping: prop_type → (numerator_cols, denominator_col)
@@ -896,7 +896,7 @@ def project_home_runs(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.Dat
     if row is not None:
         hr = _safe_float(row.get("home_runs")) or 0
         pa = _safe_float(row.get("pa")) or 0
-        if pa >= 20:
+        if pa >= 75:
             hr_rate = hr / pa
             weight  = min(pa / 300.0, 1.0)
             reg_hr  = weight * hr_rate + (1 - weight) * LEAGUE_HR_RATE
@@ -929,7 +929,7 @@ def project_walks(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFra
     if row is not None:
         walks = _safe_float(row.get("walks")) or 0
         pa    = _safe_float(row.get("pa")) or 0
-        if pa >= 20:
+        if pa >= 75:
             bb_rate = walks / pa
             weight  = min(pa / 200.0, 1.0)
             reg_bb  = weight * bb_rate + (1 - weight) * LEAGUE_BB_RATE
@@ -962,7 +962,7 @@ def project_stolen_bases(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.
     if row is not None:
         sb = _safe_float(row.get("stolen_bases")) or 0
         pa = _safe_float(row.get("pa")) or 0
-        if pa >= 20:
+        if pa >= 75:
             sb_rate  = sb / pa
             weight   = min(pa / 200.0, 1.0)
             reg_rate = weight * sb_rate + (1 - weight) * LEAGUE_SB_RATE
@@ -984,7 +984,7 @@ def project_hits_runs_rbis(player_name: str, bvp_df: pd.DataFrame, lineups_df: p
         avg = _safe_float(row.get("avg")) or LEAGUE_AVG
         rs  = _safe_float(row.get("runs")) or 0
         rbi = _safe_float(row.get("rbi")) or 0
-        if pa >= 20:
+        if pa >= 75:
             w       = min(pa / 200.0, 1.0)
             h_proj  = (w * avg             + (1-w) * LEAGUE_AVG)     * 4.0
             r_proj  = (w * (rs / pa)       + (1-w) * LEAGUE_RUN_RATE) * 4.0
@@ -1005,7 +1005,7 @@ def project_runs_scored(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.D
     if row is not None:
         runs = _safe_float(row.get("runs")) or 0
         pa   = _safe_float(row.get("pa")) or 0
-        if pa >= 20:
+        if pa >= 75:
             run_rate = runs / pa
             weight   = min(pa / 200.0, 1.0)
             reg_rate = weight * run_rate + (1 - weight) * LEAGUE_RUN_RATE
@@ -1039,7 +1039,7 @@ def project_rbis(player_name: str, bvp_df: pd.DataFrame, lineups_df: pd.DataFram
     if row is not None:
         rbi = _safe_float(row.get("rbi")) or 0
         pa  = _safe_float(row.get("pa")) or 0
-        if pa >= 20:
+        if pa >= 75:
             rbi_rate = rbi / pa
             weight   = min(pa / 200.0, 1.0)
             reg_rate = weight * rbi_rate + (1 - weight) * LEAGUE_RBI_RATE
