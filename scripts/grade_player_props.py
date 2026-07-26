@@ -142,7 +142,7 @@ def grade_date(target_date: date) -> None:
         print(f"  ⚠  {null_pk_count} props have NULL game_pk — skipping (these are old rows "
               f"saved before game_pk linkage was wired up)")
 
-    wins = losses = pushes = 0
+    wins = losses = pushes = voids = 0
     skipped = null_pk_count
 
     for game_pk, game_rows in games.items():
@@ -170,6 +170,18 @@ def grade_date(target_date: date) -> None:
                 continue
 
             stat_dict = pdata.get(side, {})
+
+            # Empty stats dict → player was scratched/DNP; books void these bets
+            if not stat_dict:
+                with engine.begin() as conn:
+                    conn.execute(text("""
+                        UPDATE player_props SET result = 'VOID', graded_at = NOW()
+                        WHERE id = :id
+                    """), {"id": row.id})
+                print(f"  ~ {row.player_name} {row.prop_type}: DNP → VOID")
+                voids += 1
+                continue
+
             parts = [stat_dict.get(k) for k in stat_keys]
             if any(p is None for p in parts):
                 missing = [k for k, p in zip(stat_keys, parts) if p is None]
@@ -201,7 +213,7 @@ def grade_date(target_date: date) -> None:
     total = wins + losses + pushes
     pct   = round(wins / (wins + losses) * 100, 1) if (wins + losses) > 0 else 0
     print(f"\n{'='*50}")
-    print(f"Results for {target_date}: {wins}W / {losses}L / {pushes}P")
+    print(f"Results for {target_date}: {wins}W / {losses}L / {pushes}P / {voids} void")
     print(f"Win rate: {pct}%  (skipped {skipped} — no boxscore data)")
 
 
