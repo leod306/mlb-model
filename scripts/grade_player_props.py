@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import unicodedata
 from datetime import date, timedelta
 
 import requests
@@ -33,6 +34,16 @@ if os.getenv("DYNO") is None:
 from app.db import engine
 
 BOXSCORE_URL = "https://statsapi.mlb.com/api/v1/game/{game_pk}/boxscore"
+
+
+def _norm(name: str) -> str:
+    """Lowercase + strip accent characters for robust name matching.
+
+    Handles mismatches like 'José Ramírez' (MLB API) vs 'Jose Ramirez' (Odds API).
+    """
+    nfkd = unicodedata.normalize("NFD", name or "")
+    ascii_str = nfkd.encode("ascii", "ignore").decode("ascii")
+    return ascii_str.lower().strip()
 
 # prop_type -> (stat_side, mlb_api_key)
 # Use a list of keys to sum multiple stats (e.g. H+R+RBI)
@@ -76,7 +87,8 @@ def extract_player_stats(boxscore: dict) -> dict[str, dict]:
             name = pdata.get("person", {}).get("fullName", "")
             if not name:
                 continue
-            stats[name.lower()] = {
+            # Normalize accents so "José Ramírez" matches "Jose Ramirez"
+            stats[_norm(name)] = {
                 "batting":  pdata.get("stats", {}).get("batting",  {}),
                 "pitching": pdata.get("stats", {}).get("pitching", {}),
             }
@@ -84,7 +96,7 @@ def extract_player_stats(boxscore: dict) -> dict[str, dict]:
 
 
 def fuzzy_match(name_key: str, player_stats: dict[str, dict]) -> dict | None:
-    """Try last-name match as fallback."""
+    """Last-name fallback. Keys in player_stats are already _norm()-ed."""
     last = name_key.split()[-1]
     matches = [v for k, v in player_stats.items() if k.split()[-1] == last]
     return matches[0] if len(matches) == 1 else None
@@ -117,12 +129,21 @@ def grade_date(target_date: date) -> None:
 
     print(f"Grading {len(rows)} props for {target_date}...")
 
-    # Group by game_pk to minimise API calls
+    # Group by game_pk to minimise API calls; warn about NULL game_pks
     games: dict[int, list] = {}
+    null_pk_count = 0
     for row in rows:
+        if row.game_pk is None:
+            null_pk_count += 1
+            continue
         games.setdefault(row.game_pk, []).append(row)
 
-    wins = losses = pushes = skipped = 0
+    if null_pk_count:
+        print(f"  ⚠  {null_pk_count} props have NULL game_pk — skipping (these are old rows "
+              f"saved before game_pk linkage was wired up)")
+
+    wins = losses = pushes = 0
+    skipped = null_pk_count
 
     for game_pk, game_rows in games.items():
         try:
@@ -135,7 +156,7 @@ def grade_date(target_date: date) -> None:
         player_stats = extract_player_stats(boxscore)
 
         for row in game_rows:
-            name_key  = row.player_name.lower()
+            name_key  = _norm(row.player_name)
             stat_info = PROP_STAT_MAP.get(row.prop_type)
             if not stat_info:
                 skipped += 1
@@ -144,6 +165,7 @@ def grade_date(target_date: date) -> None:
             side, stat_keys = stat_info
             pdata = player_stats.get(name_key) or fuzzy_match(name_key, player_stats)
             if pdata is None:
+                print(f"  ? no boxscore match for '{row.player_name}' (game {game_pk})")
                 skipped += 1
                 continue
 
