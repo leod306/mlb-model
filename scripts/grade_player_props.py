@@ -172,6 +172,9 @@ def grade_date(target_date: date) -> None:
             stat_dict = pdata.get(side, {})
             parts = [stat_dict.get(k) for k in stat_keys]
             if any(p is None for p in parts):
+                missing = [k for k, p in zip(stat_keys, parts) if p is None]
+                print(f"  ? missing stat key(s) {missing} for '{row.player_name}' "
+                      f"{row.prop_type} (game {game_pk}) | available: {list(stat_dict.keys())[:8]}")
                 skipped += 1
                 continue
 
