@@ -89,6 +89,11 @@ OVER_EXTRA  = float(os.getenv("OVER_EXTRA", "0.04"))     # OVER needs MIN_OU_EDG
 #       RL_FAV_MIN_COVER_PROB is kept here for reference but is not used.
 RL_FAV_MIN_COVER_PROB = float(os.getenv("RL_FAV_MIN_COVER_PROB", "0.50"))  # unused
 RL_DOG_MIN_COVER_PROB = float(os.getenv("RL_DOG_MIN_COVER_PROB", "0.74"))
+# Fixed sigma used ONLY for RL cover-probability math. The model's sigma_rd reflects
+# prediction uncertainty (currently ~4.7, too wide for RL thresholds). RL_SIGMA uses
+# a tighter, calibrated game-spread value so the cover probabilities land in a
+# meaningful range.  Decoupled from sigma_rd on purpose — do not replace with sigma_rd.
+RL_SIGMA = float(os.getenv("RL_SIGMA", "1.5"))
 
 # Elo constants (must match retrain.py)
 ELO_START    = 1500.0
@@ -1289,15 +1294,20 @@ def build_pick_columns(df: pd.DataFrame, sigma_total: float, sigma_rd: float) ->
         # always agree on which team is expected to win.
         fav_is_home = rd_pred >= 0
 
-        p_home_covers_15 = prob_home_covers(rd_pred, 1.5, sigma_rd)   # home wins by 2+
-        p_away_covers_15 = 1.0 - normal_cdf(-1.5, mu=-rd_pred, sigma=sigma_rd)  # away wins by 2+
+        # Use RL_SIGMA (fixed game-spread sigma) not sigma_rd (model prediction sigma).
+        # sigma_rd reflects model accuracy (~4.7) and makes all cover probabilities
+        # collapse toward 50%, rendering thresholds useless. RL_SIGMA uses game-level
+        # spread variance (~1.5) so probabilities respond meaningfully to rd_pred.
+        p_home_covers_15 = prob_home_covers(rd_pred, 1.5, RL_SIGMA)  # home wins by 2+; for display
 
         if fav_is_home:
-            fav, dog = home, away
-            p_dog_cover = 1.0 - p_home_covers_15           # dog +1.5 (home fails to win by 2+)
+            # Away dog covers +1.5 if home wins by <2  → P(rd < 1.5)
+            p_dog_cover = 1.0 - p_home_covers_15   # = normal_cdf(1.5, rd_pred, RL_SIGMA)
+            dog = away
         else:
-            fav, dog = away, home
-            p_dog_cover = 1.0 - p_away_covers_15
+            # Home dog covers +1.5 if away wins by <2 → P(rd > -1.5)
+            p_dog_cover = 1.0 - normal_cdf(-1.5, mu=rd_pred, sigma=RL_SIGMA)
+            dog = home
 
         # Never pick fav -1.5: historically only 38.1% win rate (vs +1.5 dogs at 63.7%).
         # Only bet the underdog +1.5 when the model has high confidence the fav won't dominate.
