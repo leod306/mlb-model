@@ -1315,6 +1315,21 @@ def build_pick_columns(df: pd.DataFrame, sigma_total: float, sigma_rd: float) ->
     df["runline_pick"]       = [x[0] for x in rl_results]
     df["rl_home_cover_prob"] = [x[1] for x in rl_results]
 
+    # Consistency guard: if ML picks Team A, RL must not pick Team B -1.5.
+    # (Team B -1.5 implies Team B wins outright, directly contradicting the ML.)
+    # ML=PASS is fine — RL can still find value without an ML opinion.
+    def _fix_rl(row):
+        ml = row["ml_pick"]
+        rl = row["runline_pick"]
+        if ml in (None, "PASS") or rl in (None, "PASS"):
+            return rl
+        parts = str(rl).rsplit(" ", 1)
+        if len(parts) == 2 and parts[1] == "-1.5" and parts[0] != ml:
+            return "PASS"
+        return rl
+
+    df["runline_pick"] = df.apply(_fix_rl, axis=1)
+
     # legacy column some dashboards read
     df["model_edge"] = df["ml_edge"]
     return df
