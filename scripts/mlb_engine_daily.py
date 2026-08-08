@@ -74,6 +74,10 @@ OU_ASSUMED_PRICE = int(os.getenv("OU_ASSUMED_PRICE", "-110"))   # breakeven .523
 # lower and you're betting noise, higher and you'll almost never bet.
 MIN_ML_EDGE = float(os.getenv("MIN_ML_EDGE", "0.03"))    # model prob vs novig market prob
 MIN_OU_EDGE = float(os.getenv("MIN_OU_EDGE", "0.07"))    # P(side) vs breakeven at OU_ASSUMED_PRICE
+# Extra edge required before betting OVER. Historical: OVER hits 46.5% vs UNDER 50.6%.
+# The model's total_runs_pred is systematically biased high, so we demand more conviction
+# before picking OVER. UNDER uses MIN_OU_EDGE only.
+OVER_EXTRA  = float(os.getenv("OVER_EXTRA", "0.04"))     # OVER needs MIN_OU_EDGE + OVER_EXTRA
 
 # Run line thresholds. We do NOT have run line prices in market_odds, so these
 # picks are advisory only and never ranked in top plays. Typical prices:
@@ -81,7 +85,9 @@ MIN_OU_EDGE = float(os.getenv("MIN_OU_EDGE", "0.07"))    # P(side) vs breakeven 
 #   underdog +1.5 costs ~-180..-250 (breakeven ~.64-.71)
 # Thresholds below are conservative vs those typical prices.
 # TODO: add RL prices to the odds loader — then these become edge-vs-price too.
-RL_FAV_MIN_COVER_PROB = float(os.getenv("RL_FAV_MIN_COVER_PROB", "0.50"))
+# NOTE: RL -1.5 fav picks are disabled — historically only 38.1% (vs +1.5 dogs at 63.7%).
+#       RL_FAV_MIN_COVER_PROB is kept here for reference but is not used.
+RL_FAV_MIN_COVER_PROB = float(os.getenv("RL_FAV_MIN_COVER_PROB", "0.50"))  # unused
 RL_DOG_MIN_COVER_PROB = float(os.getenv("RL_DOG_MIN_COVER_PROB", "0.74"))
 
 # Elo constants (must match retrain.py)
@@ -1247,9 +1253,12 @@ def build_pick_columns(df: pd.DataFrame, sigma_total: float, sigma_rd: float) ->
         # This ensures ML and RL picks always agree on direction.
         p_home = prob_over(rd_pred, 0.0, sigma_rd)
         edge = p_home - m_home
-        if edge >= MIN_ML_EDGE:
+        # Only bet a team our model actually thinks is more likely to win (p >= 50%).
+        # Contrarian bets (edge vs market but model disagrees on direction) historically
+        # win only 42.1% — worse than random. Skip them entirely.
+        if edge >= MIN_ML_EDGE and p_home >= 0.50:
             return r["home_team"], edge
-        if edge <= -MIN_ML_EDGE:
+        if edge <= -MIN_ML_EDGE and p_home <= 0.50:
             return r["away_team"], edge
         return "PASS", edge
 
@@ -1260,7 +1269,10 @@ def build_pick_columns(df: pd.DataFrame, sigma_total: float, sigma_rd: float) ->
             # No market total for this game — nothing to bet against.
             return "PASS", None, None
         p_ov = prob_over(pred, line, sigma_total)
-        if p_ov >= ou_breakeven + MIN_OU_EDGE:
+        # OVER requires a higher edge bar — the model's total_runs_pred is biased high,
+        # so OVER hits only 46.5% historically vs UNDER at 50.6%.
+        # OVER_EXTRA tightens the OVER threshold to demand genuine conviction.
+        if p_ov >= ou_breakeven + MIN_OU_EDGE + OVER_EXTRA:
             return "OVER",  p_ov, p_ov - ou_breakeven
         if (1.0 - p_ov) >= ou_breakeven + MIN_OU_EDGE:
             return "UNDER", p_ov, (1.0 - p_ov) - ou_breakeven
@@ -1268,7 +1280,6 @@ def build_pick_columns(df: pd.DataFrame, sigma_total: float, sigma_rd: float) ->
 
     def get_rl(r):
         rd_pred = coerce_float(r.get("run_diff_pred"))
-        m_home  = coerce_float(r.get("market_home_prob_novig"))
         home    = r["home_team"]
         away    = r["away_team"]
         if rd_pred is None:
@@ -1283,15 +1294,13 @@ def build_pick_columns(df: pd.DataFrame, sigma_total: float, sigma_rd: float) ->
 
         if fav_is_home:
             fav, dog = home, away
-            p_fav_cover = p_home_covers_15                 # fav -1.5
             p_dog_cover = 1.0 - p_home_covers_15           # dog +1.5 (home fails to win by 2+)
         else:
             fav, dog = away, home
-            p_fav_cover = p_away_covers_15
             p_dog_cover = 1.0 - p_away_covers_15
 
-        if p_fav_cover >= RL_FAV_MIN_COVER_PROB:
-            return f"{fav} -1.5", p_home_covers_15
+        # Never pick fav -1.5: historically only 38.1% win rate (vs +1.5 dogs at 63.7%).
+        # Only bet the underdog +1.5 when the model has high confidence the fav won't dominate.
         if p_dog_cover >= RL_DOG_MIN_COVER_PROB:
             return f"{dog} +1.5", p_home_covers_15
         return "PASS", p_home_covers_15
